@@ -79,7 +79,7 @@ def load_block_group_data():
         demographics = pd.read_csv('demographics_block_groups.csv')
 
         # Retain only identifiers + geometry from GeoJSON to avoid duplicate attribute columns
-    keep_cols = [col for col in ['GEOID', 'geometry'] if col in gdf.columns]
+        keep_cols = [col for col in ['GEOID', 'geometry'] if col in gdf.columns]
         gdf = gdf[keep_cols].copy()
 
         # Ensure GEOID formats match for proper merging
