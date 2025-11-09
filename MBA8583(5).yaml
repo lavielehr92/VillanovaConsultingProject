@@ -1,0 +1,210 @@
+name: MBA8583
+channels:
+  - conda-forge
+  - defaults
+dependencies:
+  # Core Python and Scientific Computing
+  - python=3.11
+  - numpy
+  - pandas
+  - scipy
+  - matplotlib
+  - seaborn
+  - scikit-learn
+  - numexpr
+  - bottleneck
+  
+  # Machine Learning & AI
+  - xgboost
+  - lightgbm
+  - faiss-cpu
+  - flaml
+  - pyautogen
+  - langchain
+  - langchain-community
+  - langchain-groq
+  - groq
+  
+  # Development Environment
+  - jupyter
+  - jupyterlab
+  - ipykernel
+  - spyder
+  - spyder-kernels
+  - qtconsole
+  
+  # Data Processing & Web
+  - requests
+  - beautifulsoup4
+  - bs4
+  - urllib3
+  - httpx
+  - httpcore
+  - aiohttp
+  - aiohappyeyeballs
+  
+  # File I/O
+  - openpyxl
+  - xlwings
+  - lxml
+  - pyyaml
+  - jsonschema
+  - jsonpatch
+  - jsonpointer
+  
+  # Visualization
+  - plotly
+  - folium
+  - pillow
+  - imagesize
+  
+  # Database & Cloud
+  - sqlalchemy
+  - psycopg2
+  - pyarrow
+  - boto3
+  - s3fs
+  
+  # Development Tools
+  - black
+  - flake8
+  - pylint
+  - autopep8
+  - isort
+  - rope
+  - yapf
+  
+  # GUI & Qt
+  - pyqt
+  - pyqt5-sip
+  - pyqtwebengine
+  - qt-main
+  - qt-webengine
+  - qtawesome
+  - qtpy
+  
+  # Utilities
+  - tqdm
+  - colorama
+  - click
+  - jinja2
+  - markupsafe
+  - cryptography
+  - bcrypt
+  - paramiko
+  - pynacl
+  - keyring
+  - certifi
+  - charset-normalizer
+  - idna
+  - pysocks
+  
+  # Math & Intel Libraries
+  - mkl
+  - mkl-service
+  - mkl_fft
+  - mkl_random
+  - intel-openmp
+  - tbb
+  
+  # AWS SDK Components
+  - boto3
+  - botocore
+  
+  # Text Processing
+  - regex
+  - textdistance
+  - python-slugify
+  - text-unidecode
+  - jellyfish
+  
+  # Development Dependencies
+  - setuptools
+  - pip
+  - wheel
+  - packaging
+  - importlib-metadata
+  - importlib_metadata
+  - importlib_resources
+  - pkgutil-resolve-name
+  - platformdirs
+  
+  # Jupyter Extensions
+  - nbconvert
+  - nbformat
+  - nbclient
+  - jupyter_client
+  - jupyter_core
+  - jupyterlab_pygments
+  - ipywidgets
+  - widgetsnbextension
+  
+  # Additional Tools
+  - cookiecutter
+  - questionary
+  - python-dotenv
+  - python-dateutil
+  - pytz
+  - python-tzdata
+  - python-dateutil
+  
+  # Pip packages that aren't available in conda
+  - pip:
+      - yfinance
+      - yahooquery
+      - wrds
+      - geopy
+      - haversine
+      - langchain-openai
+      - langchain-huggingface
+      - langchain-text-splitters
+      - langsmith
+      - sentence-transformers
+      - transformers
+      - torch
+      - huggingface-hub
+      - tokenizers
+      - tiktoken
+      - safetensors
+      - pydantic
+      - pydantic-core
+      - annotated-types
+      - openai
+      - groq
+      - shiny
+      - shinylive
+      - shinyswatch
+      - shinywidgets
+      - ortools
+      - networkx
+      - sympy
+      - protobuf
+      - absl-py
+      - google-search-results
+      - requests-futures
+      - requests-toolbelt
+      - curl-cffi
+      - branca
+      - folium
+      - immutabledict
+      - frozendict
+      - lzstring
+      - multitasking
+      - narwhals
+      - orjson
+      - jiter
+      - pipreqs
+      - yarg
+      - docopt
+      - chevron
+      - filelock
+      - fsspec
+      - future
+      - mpmath
+      - xyzservices
+      - zstandard
+      - typing-inspection
+      - websockets
+      - pyreadr
+      - geographiclib
+      - rsconnect

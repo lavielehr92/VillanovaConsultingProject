@@ -1,0 +1,10 @@
+python-docx
+python-dotenv
+openai>=1.40.0
+yfinance
+streamlit
+plotly
+pandas
+numpy
+requests
+pyshp

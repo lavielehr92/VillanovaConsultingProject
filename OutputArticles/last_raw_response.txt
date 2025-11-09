@@ -1,0 +1,15 @@
+{
+  "SC": true,
+  "SENT": -10,
+  "INV": false,
+  "INV_intens": 0,
+  "SHIP": false,
+  "SHIP_intens": 0,
+  "COMM": false,
+  "COMM_intens": 0,
+  "MANUF": true,
+  "MANUF_intens": 40,
+  "30D": -20,
+  "90D": -10,
+  "rationale": "The article discusses trends in technology and their impact on businesses, including the role of AI in manufacturing, indicating a connection to manufacturing. The overall tone is slightly negative due to job cuts and economic concerns, while manufacturing output is expected to increase. There are no mentions of inventory issues, shipping times, or commodity price changes."
+}
