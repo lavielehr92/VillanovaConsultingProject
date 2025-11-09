@@ -1,3 +1,0 @@
-shiny
-yfinance
-pandas
