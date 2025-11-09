@@ -79,10 +79,9 @@ def load_block_group_data():
         demographics = pd.read_csv('demographics_block_groups.csv')
         
         # FIX: Ensure GEOID formats match for proper merging
-        # CSV has float IDs like "421019809016.0", GeoJSON has int/string like "421019809016"
-        # Convert both to integer then to string to ensure they match
-        gdf['GEOID'] = gdf['GEOID'].astype(str).str.replace('.0', '', regex=False)
-        demographics['block_group_id'] = demographics['block_group_id'].astype(float).astype(int).astype(str)
+        # Both should be strings without decimal points
+        gdf['GEOID'] = gdf['GEOID'].astype(str)
+        demographics['block_group_id'] = demographics['block_group_id'].astype(str)
         
         # CRITICAL: Clean Census sentinel values BEFORE any calculations
         # Census uses -666666666 to indicate "no data available"
