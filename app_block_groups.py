@@ -151,11 +151,15 @@ def create_choropleth_map(gdf_filtered, demographics_filtered, color_column, tit
             row = plot_data.iloc[idx]
             feature['id'] = str(idx)
             feature['properties']['block_group_id'] = str(row.get('block_group_id', 'N/A'))
-            feature['properties']['k12_pop'] = int(row.get('k12_pop', 0))
-            feature['properties']['income'] = int(row.get('income', 0))
-            feature['properties']['poverty_rate'] = float(row.get('poverty_rate', 0))
+            k12_val = row.get('k12_pop', np.nan)
+            income_val = row.get('income', np.nan)
+            poverty_val = row.get('poverty_rate', np.nan)
+            feature['properties']['k12_pop'] = 0 if pd.isna(k12_val) else int(k12_val)
+            feature['properties']['income'] = 0 if pd.isna(income_val) else int(income_val)
+            feature['properties']['poverty_rate'] = 0.0 if pd.isna(poverty_val) else float(poverty_val)
             if color_column in row:
-                feature['properties'][color_column] = float(row.get(color_column, 0))
+                color_val = row.get(color_column, np.nan)
+                feature['properties'][color_column] = 0.0 if pd.isna(color_val) else float(color_val)
     
     # Build custom hover template with proper formatting for missing data
     # Note: NaN values will display as "nan" in plotly, we'll handle this in customdata
