@@ -64,7 +64,12 @@ def compute_edi_block_groups(demographics_df, schools_df, max_distance_km=15):
         bg_id = block_group['block_group_id']
         bg_lat = block_group['lat']
         bg_lon = block_group['lon']
+        
+        # Ensure bg_k12_pop is a scalar (not a Series)
         bg_k12_pop = block_group.get('k12_pop', 0)
+        if pd.api.types.is_list_like(bg_k12_pop):
+            bg_k12_pop = bg_k12_pop.iloc[0] if hasattr(bg_k12_pop, 'iloc') else 0
+        bg_k12_pop = float(bg_k12_pop) if pd.notna(bg_k12_pop) else 0.0
         
         # Skip if coordinates are invalid
         if pd.isna(bg_lat) or pd.isna(bg_lon):
@@ -123,7 +128,14 @@ def compute_edi_block_groups(demographics_df, schools_df, max_distance_km=15):
         
         # Component 4: Neighborhood need (poverty rate and education gaps)
         poverty_rate = block_group.get('poverty_rate', 15.0)  # Default if missing
+        if pd.api.types.is_list_like(poverty_rate):
+            poverty_rate = poverty_rate.iloc[0] if hasattr(poverty_rate, 'iloc') else 15.0
+        poverty_rate = float(poverty_rate) if pd.notna(poverty_rate) else 15.0
+        
         pct_lt_hs = block_group.get('pct_lt_hs', 8.0)  # Default if missing
+        if pd.api.types.is_list_like(pct_lt_hs):
+            pct_lt_hs = pct_lt_hs.iloc[0] if hasattr(pct_lt_hs, 'iloc') else 8.0
+        pct_lt_hs = float(pct_lt_hs) if pd.notna(pct_lt_hs) else 8.0
         
         # Combine into neighborhood need score
         neighborhood_need = (poverty_rate / 100.0) * 0.7 + (pct_lt_hs / 100.0) * 0.3
