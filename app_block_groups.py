@@ -79,9 +79,10 @@ def load_block_group_data():
         demographics = pd.read_csv('demographics_block_groups.csv')
         
         # FIX: Ensure GEOID formats match for proper merging
-        # Convert both to string to ensure they match
-        gdf['GEOID'] = gdf['GEOID'].astype(str)
-        demographics['block_group_id'] = demographics['block_group_id'].astype(str)
+        # CSV has float IDs like "421019809016.0", GeoJSON has int/string like "421019809016"
+        # Convert both to integer then to string to ensure they match
+        gdf['GEOID'] = gdf['GEOID'].astype(str).str.replace('.0', '', regex=False)
+        demographics['block_group_id'] = demographics['block_group_id'].astype(float).astype(int).astype(str)
         
         # CRITICAL: Clean Census sentinel values BEFORE any calculations
         # Census uses -666666666 to indicate "no data available"
@@ -152,40 +153,67 @@ def create_choropleth_map(gdf_filtered, demographics_filtered, color_column, tit
             if color_column in row:
                 feature['properties'][color_column] = float(row.get(color_column, 0))
     
-    # Build custom hover template (include tract and extra ACS attributes if present)
+    # Build custom hover template with proper formatting for missing data
+    # Note: NaN values will display as "nan" in plotly, we'll handle this in customdata
     hover_template = '<b>Block Group: %{customdata[0]}</b><br>'
     hover_template += 'Tract: %{customdata[1]}<br>'
-    hover_template += '<b>K-12 Population: %{customdata[2]:.0f}</b><br>'
-    hover_template += 'Median Income: $%{customdata[3]:,.0f}<br>'
-    hover_template += 'Poverty Rate: %{customdata[4]:.1f}%<br>'
-    hover_template += 'Total Pop: %{customdata[5]:.0f}<br>'
-    hover_template += 'HH with <18: %{customdata[6]:.0f}<br>'
-    hover_template += 'Pct Black: %{customdata[7]:.1f}% | Pct White: %{customdata[8]:.1f}%<br>'
-    hover_template += f'<b>{color_column.replace("_", " ").title()}: ' + '%{customdata[9]:.1f}</b><extra></extra>'
+    hover_template += '<b>K-12 Population: %{customdata[2]}</b><br>'
+    hover_template += 'Median Income: %{customdata[3]}<br>'
+    hover_template += 'Poverty Rate: %{customdata[4]}<br>'
+    hover_template += 'Total Pop: %{customdata[5]}<br>'
+    hover_template += 'HH with Children <18: %{customdata[6]}<br>'
+    hover_template += '% First-Gen College: %{customdata[7]}<br>'
+    hover_template += '% Christian: %{customdata[8]}<br>'
+    hover_template += f'<b>{color_column.replace("_", " ").title()}: %{{customdata[9]}}</b><extra></extra>'
     
-    # Prepare custom data for hover
+    # Prepare custom data for hover with proper formatting
     cleaned = plot_data.copy()
-    if 'income' in cleaned.columns:
-        cleaned['income'] = cleaned['income'].replace(-666666666, np.nan)
-    if 'poverty_rate' in cleaned.columns:
-        cleaned['poverty_rate'] = pd.to_numeric(cleaned['poverty_rate'], errors='coerce')
+    
+    # Clean sentinel values
+    sentinel_cols = ['income', 'poverty_rate', 'pct_black', 'pct_white', '%first_gen', '%Christian']
+    for col in sentinel_cols:
+        if col in cleaned.columns:
+            cleaned[col] = cleaned[col].replace(-666666666, np.nan)
+            cleaned[col] = pd.to_numeric(cleaned[col], errors='coerce')
+    
     # Ensure color column sentinel removed
     if color_column in cleaned.columns:
         cleaned[color_column] = cleaned[color_column].replace(-666666666, np.nan)
-    def safe_arr(col):
-        return cleaned[col].values if col in cleaned.columns else np.array([np.nan]*len(cleaned))
-    customdata = np.stack([
-        safe_arr('block_group_id'),
-        safe_arr('TRACTCE'),
-        safe_arr('k12_pop'),
-        safe_arr('income'),
-        safe_arr('poverty_rate'),
-        safe_arr('total_pop'),
-        safe_arr('hh_with_u18'),
-        safe_arr('pct_black'),
-        safe_arr('pct_white'),
-        safe_arr(color_column)
-    ], axis=-1)
+    
+    # Helper function to format values for display
+    def format_value(row, col, format_type='number'):
+        """Format value for hover display, showing 'N/A' for missing data"""
+        val = row.get(col, np.nan)
+        if pd.isna(val):
+            return 'N/A'
+        if format_type == 'currency':
+            return f'${val:,.0f}'
+        elif format_type == 'percent':
+            return f'{val:.1f}%'
+        elif format_type == 'integer':
+            return f'{int(val):,}'
+        else:
+            return f'{val:.1f}'
+    
+    # Create formatted customdata
+    customdata_list = []
+    for idx, row in cleaned.iterrows():
+        customdata_list.append([
+            str(row.get('block_group_id', 'N/A')),
+            str(row.get('TRACTCE', 'N/A')),
+            format_value(row, 'k12_pop', 'integer'),
+            format_value(row, 'income', 'currency'),
+            format_value(row, 'poverty_rate', 'percent'),
+            format_value(row, 'total_pop', 'integer'),
+            format_value(row, 'hh_with_u18', 'integer'),
+            format_value(row, '%first_gen', 'percent'),
+            format_value(row, '%Christian', 'percent'),
+            format_value(row, color_column, 'number' if color_column == 'EDI' else 'integer')
+        ])
+    
+    customdata = np.array(customdata_list)
+    
+    # Get z values for coloring
     z_vals = cleaned[color_column].values if color_column in cleaned.columns else plot_data[color_column].values
     # Fallback if all-NaN z values
     if np.all(np.isnan(z_vals)):
