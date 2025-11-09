@@ -1,0 +1,11 @@
+school_name,type,tuition,rating,lat,lon,capacity
+Cornerstone Christian Academy (58th St Campus),private,8000,4.5,39.9386,-75.2312,300
+Cornerstone Christian Academy (Baltimore Ave Campus),private,8000,4.5,39.9508,-75.2085,300
+St. Thomas Aquinas School,private,5000,4.0,39.9267,-75.1783,250
+St. Francis de Sales School,private,4500,3.8,39.9528,-75.2097,200
+The City School,private,6000,4.2,39.9656,-75.1433,400
+Philadelphia Christian Academy,private,5500,3.9,40.0186,-75.1433,350
+Friends Select School,private,40000,4.8,39.9526,-75.1652,500
+Springside Chestnut Hill Academy,private,42000,4.7,40.0789,-75.2078,450
+Science Leadership Academy,charter,0,4.5,39.9528,-75.1655,600
+Central High School,public,0,4.2,39.9526,-75.1652,800
