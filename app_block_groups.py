@@ -529,26 +529,26 @@ def main():
     st.subheader("Block Group Insights to Guide Outreach and Growth")
     
     # Add explanation of EDI in an expandable section
-     with st.expander("ℹ️ What is the Educational Desert Index (EDI)?"):
-          st.markdown("""
-          ### Why CCA Tracks EDI
+    with st.expander("ℹ️ What is the Educational Desert Index (EDI)?"):
+        st.markdown("""
+        ### Why CCA Tracks EDI
 
-          The Educational Desert Index spotlights neighborhoods where families have limited access to affordable, high-quality Christian schooling. **Higher EDI means families near CCA have fewer nearby choices and greater need for support.**
+        The Educational Desert Index spotlights neighborhoods where families have limited access to affordable, high-quality Christian schooling. **Higher EDI means families near CCA have fewer nearby choices and greater need for support.**
 
-          #### How We Calculate It
-          1. **Accessible Seats (55%)** – Compares nearby K-12 demand with available CCA or partner seats. Capacity crunches lift the score.
-          2. **Travel Friction (25%)** – Rewards proximity to a CCA campus; distance or transit barriers increase EDI.
-          3. **Community Stress (20%)** – Blends poverty and adult educational attainment to capture holistic need.
+        #### How We Calculate It
+        1. **Accessible Seats (55%)** – Compares nearby K-12 demand with available CCA or partner seats. Capacity crunches lift the score.
+        2. **Travel Friction (25%)** – Rewards proximity to a CCA campus; distance or transit barriers increase EDI.
+        3. **Community Stress (20%)** – Blends poverty and adult educational attainment to capture holistic need.
 
-          Each component is scaled 0–1 and combined, then translated to a 0–100 score for easy interpretation.
+        Each component is scaled 0–1 and combined, then translated to a 0–100 score for easy interpretation.
 
-          #### Reading the Score
-          - **70–100** → Highest priorities for outreach and scholarship engagement.
-          - **40–69** → Viable growth corridors that deserve deeper relationship-building.
-          - **0–39** → Communities already surrounded by school options.
+        #### Reading the Score
+        - **70–100** → Highest priorities for outreach and scholarship engagement.
+        - **40–69** → Viable growth corridors that deserve deeper relationship-building.
+        - **0–39** → Communities already surrounded by school options.
 
-          Pair high EDI with strong HPFI and K-12 population to focus marketing, transportation planning, and church partnerships.
-          """)
+        Pair high EDI with strong HPFI and K-12 population to focus marketing, transportation planning, and church partnerships.
+        """)
     
     # Load data
     with st.spinner("Loading Census block group data..."):
