@@ -12,8 +12,40 @@ import os
 from educational_desert_index_bg import compute_edi_block_groups, haversine_km
 import numpy as np
 from sklearn.preprocessing import MinMaxScaler
-from competition_ingest import load_competition_schools
-from school_ingest import load_census_schools
+try:
+    from competition_ingest import load_competition_schools
+except ModuleNotFoundError:
+    def load_competition_schools(*, output_path: str | None = None, **_: object) -> pd.DataFrame:
+        """Fallback loader when competition_ingest isn't available.
+
+        Streamlit Cloud runners only include tracked repo files, so if the optional
+        ingestion utility isn't deployed we fall back to the cached CSV that ships
+        with the app.  Returning an empty frame keeps the map working even when the
+        file is missing.
+        """
+
+        csv_path = output_path or "competition_schools.csv"
+        if os.path.exists(csv_path):
+            try:
+                return pd.read_csv(csv_path)
+            except Exception:
+                pass
+        return pd.DataFrame(columns=[
+            "school_name", "type", "grades", "address", "notable_info",
+            "capacity_hint", "lat", "lon", "capacity"
+        ])
+
+try:
+    from school_ingest import load_census_schools
+except ModuleNotFoundError:
+    def load_census_schools(*, output_path: str | None = None, **_: object) -> pd.DataFrame:
+        csv_path = output_path or "census_schools.csv"
+        if os.path.exists(csv_path):
+            try:
+                return pd.read_csv(csv_path)
+            except Exception:
+                pass
+        return pd.DataFrame(columns=["school_name", "type", "lat", "lon", "capacity"])
 try:
     # Allow optional live refresh import
     from fetch_block_groups_live import main as fetch_live_block_groups
@@ -167,6 +199,15 @@ def create_choropleth_map(
     
     # Merge geodata with demographic data
     plot_data = gdf_filtered.merge(demographics_filtered, left_on='GEOID', right_on='block_group_id', how='left')
+
+    if 'first_gen_pct' not in plot_data.columns and '%first_gen' in plot_data.columns:
+        plot_data['first_gen_pct'] = pd.to_numeric(plot_data['%first_gen'], errors='coerce')
+    if 'first_gen_pct' in plot_data.columns:
+        plot_data['first_gen_pct'] = pd.to_numeric(plot_data['first_gen_pct'], errors='coerce')
+    if 'EDI' in plot_data.columns:
+        plot_data['EDI'] = pd.to_numeric(plot_data['EDI'], errors='coerce')
+    if 'hpfi' in plot_data.columns:
+        plot_data['hpfi'] = pd.to_numeric(plot_data['hpfi'], errors='coerce')
     
     st.sidebar.write(f"🔍 Debug: Merged data has {len(plot_data)} rows")
     
@@ -207,22 +248,17 @@ def create_choropleth_map(
                 feature['properties'][color_column] = 0.0 if pd.isna(color_val) else float(color_val)
     
     # Build custom hover template with proper formatting for missing data
-    # Note: NaN values will display as "nan" in plotly, we'll handle this in customdata
     hover_template = '<b>Block Group: %{customdata[0]}</b><br>'
-    hover_template += 'Tract: %{customdata[1]}<br>'
-    hover_template += '<b>K-12 Population: %{customdata[2]}</b><br>'
-    hover_template += 'Median Income: %{customdata[3]}<br>'
-    hover_template += 'Poverty Rate: %{customdata[4]}<br>'
-    hover_template += 'Total Pop: %{customdata[5]}<br>'
-    hover_template += 'HH with Children <18: %{customdata[6]}<br>'
-    hover_template += '% First-Gen College: %{customdata[7]}<br>'
-    hover_template += '% Christian: %{customdata[8]}<br>'
-    hover_template += f'<b>{color_column.replace("_", " ").title()}: %{{customdata[9]}}</b><extra></extra>'
+    hover_template += 'EDI: %{customdata[1]}<br>'
+    hover_template += 'Median Income: %{customdata[2]}<br>'
+    hover_template += 'First-Gen %: %{customdata[3]}<br>'
+    hover_template += 'K-12 Population: %{customdata[4]}<br>'
+    hover_template += 'HPFI: %{customdata[5]}<extra></extra>'
     
     # Prepare custom data for hover with proper formatting
     cleaned = plot_data.copy()
 
-    numeric_cols = ['income', 'poverty_rate', 'total_pop', 'hh_with_u18', '%first_gen', '%Christian', 'k12_pop', color_column]
+    numeric_cols = ['income', 'first_gen_pct', 'k12_pop', 'hpfi', 'EDI', color_column]
     for col in numeric_cols:
         if col in cleaned.columns:
             cleaned[col] = cleaned[col].replace(-666666666, np.nan)
@@ -254,34 +290,21 @@ def create_choropleth_map(
             return f'{val:.1f}%'
         elif format_type == 'integer':
             return f'{int(val):,}'
+        elif format_type == 'hpfi':
+            return f'{val:.2f}'
         else:
             return f'{val:.1f}'
-
-    def metric_format(col_name: str) -> str:
-        if col_name == 'EDI':
-            return 'number'
-        if col_name == 'income':
-            return 'currency'
-        if 'rate' in col_name or 'pct' in col_name or col_name.endswith('%'):
-            return 'percent'
-        if col_name in ['%first_gen', '%Christian']:
-            return 'percent'
-        return 'integer'
 
     # Create formatted customdata
     customdata_list = []
     for _, row in cleaned.iterrows():
         customdata_list.append([
             str(row.get('block_group_id', 'N/A')),
-            str(row.get('TRACTCE', 'N/A')),
-            format_value(row, 'k12_pop', 'integer'),
+            format_value(row, 'EDI', 'number'),
             format_value(row, 'income', 'currency'),
-            format_value(row, 'poverty_rate', 'percent'),
-            format_value(row, 'total_pop', 'integer'),
-            format_value(row, 'hh_with_u18', 'integer'),
-            format_value(row, '%first_gen', 'percent'),
-            format_value(row, '%Christian', 'percent'),
-            format_value(row, color_column, metric_format(color_column))
+            format_value(row, 'first_gen_pct', 'percent'),
+            format_value(row, 'k12_pop', 'integer'),
+            format_value(row, 'hpfi', 'hpfi'),
         ])
 
     customdata = np.array(customdata_list)
@@ -738,12 +761,10 @@ def main():
     
     # Visualization selection
     color_options = {
-        'Educational Desert Index': 'EDI',
+        'Educational Desert Index (EDI)': 'EDI',
         'High-Potential Family Index (HPFI)': 'hpfi',
-        'K-12 Population': 'k12_pop', 
         'Median Income': 'income',
-        'Poverty Rate': 'poverty_rate',
-        'Marketing Priority': 'marketing_priority'
+        'First-Generation %': 'first_gen_pct'
     }
     
     selected_metric = st.sidebar.selectbox(
