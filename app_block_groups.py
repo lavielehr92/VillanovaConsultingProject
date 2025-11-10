@@ -84,7 +84,7 @@ def get_census_api_key():
 
 # Page config
 st.set_page_config(
-    page_title="Philadelphia Educational Desert Explorer - Block Groups", 
+    page_title="CCA Enrollment Opportunity Explorer", 
     layout="wide", 
     initial_sidebar_state="expanded"
 )
@@ -116,11 +116,34 @@ def compute_hpfi_scores(df: pd.DataFrame, edi_col: str = "EDI") -> pd.DataFrame:
         return pd.Series(scaled, index=series.index)
 
     working = df.copy()
+
+    candidate_names = []
+    if isinstance(edi_col, str):
+        candidate_names.extend([edi_col, edi_col.lower(), edi_col.upper()])
+    candidate_names.extend([col for col in working.columns if isinstance(col, str) and col.lower() == str(edi_col).lower()])
+
+    edi_series = None
+    for name in candidate_names:
+        if isinstance(name, str) and name in working.columns:
+            maybe_series = working[name]
+            edi_series = maybe_series if isinstance(maybe_series, pd.Series) else pd.Series(maybe_series)
+            break
+
+    if edi_series is None:
+        edi_series = pd.Series(np.nan, index=working.index)
+    else:
+        if not isinstance(edi_series, pd.Series):
+            edi_series = pd.Series(edi_series)
+        if len(edi_series.index) != len(working.index):
+            edi_series = edi_series.reset_index(drop=True)
+            edi_series = edi_series.reindex(range(len(working.index)))
+        edi_series.index = working.index
+
     income_norm = normalise(working.get("income"))
     first_gen_norm = normalise(working.get("first_gen_pct", working.get("%first_gen")))
     k12_norm = normalise(working.get("k12_pop"))
 
-    edi_values = pd.to_numeric(working.get(edi_col), errors="coerce").fillna(0.0)
+    edi_values = pd.to_numeric(edi_series, errors="coerce").fillna(0.0)
     inverse_edi = 1.0 - (edi_values / 100.0).clip(lower=0.0, upper=1.0)
 
     weights = {
@@ -502,44 +525,30 @@ def calculate_marketing_priority_bg(demographics_df, cca_campuses):
 
 # Main app
 def main():
-    st.title("🏫 Philadelphia Educational Desert Explorer")
-    st.subheader("Block Group Analysis for CCA Expansion Planning")
+    st.title("🏫 Cornerstone Christian Academy Enrollment Opportunity Explorer")
+    st.subheader("Block Group Insights to Guide Outreach and Growth")
     
     # Add explanation of EDI in an expandable section
-    with st.expander("ℹ️ What is the Educational Desert Index (EDI)?"):
-        st.markdown("""
-        ### Educational Desert Index (EDI) - Scale: 0 to 100
-        
-        The **EDI score** measures how underserved a neighborhood is for quality educational options. 
-        
-        **Higher EDI = Greater Educational Need** (more "desert-like")
-        
-        #### EDI Components:
-        1. **School Accessibility (55%)**: Distance and capacity of nearby schools
-           - Fewer nearby schools → Higher EDI
-           - Schools at capacity → Higher EDI
-        
-        2. **Geographic Isolation (25%)**: Physical distance to nearest quality school
-           - Farther from schools → Higher EDI
-        
-        3. **Neighborhood Need (20%)**: Socioeconomic indicators
-           - Higher poverty rates → Higher EDI
-           - Lower educational attainment → Higher EDI
-        
-        #### How to Use EDI:
-        - **EDI 70-100**: High priority areas with severe educational gaps
-        - **EDI 40-69**: Moderate need areas worth consideration
-        - **EDI 0-39**: Well-served areas with adequate school access
-        
-        Block groups with high EDI scores and high K-12 populations are prime expansion targets.
-        
-        #### About the Data:
-        - **K-12 Population**: Census ages 5-17 from ACS 2022
-        - **0-Population Block Groups**: ~5% of block groups have 0 residents (parks, water, industrial areas, etc.) - these are excluded from EDI by default
-        - **Median Income**: Per block group (not household filtering)
-        - **Poverty Rate**: Percentage of population below federal poverty line
-        - **Special Tract Codes**: Tracts starting with 98xxxx are typically non-residential (water bodies, parks, large facilities)
-        """)
+     with st.expander("ℹ️ What is the Educational Desert Index (EDI)?"):
+          st.markdown("""
+          ### Why CCA Tracks EDI
+
+          The Educational Desert Index spotlights neighborhoods where families have limited access to affordable, high-quality Christian schooling. **Higher EDI means families near CCA have fewer nearby choices and greater need for support.**
+
+          #### How We Calculate It
+          1. **Accessible Seats (55%)** – Compares nearby K-12 demand with available CCA or partner seats. Capacity crunches lift the score.
+          2. **Travel Friction (25%)** – Rewards proximity to a CCA campus; distance or transit barriers increase EDI.
+          3. **Community Stress (20%)** – Blends poverty and adult educational attainment to capture holistic need.
+
+          Each component is scaled 0–1 and combined, then translated to a 0–100 score for easy interpretation.
+
+          #### Reading the Score
+          - **70–100** → Highest priorities for outreach and scholarship engagement.
+          - **40–69** → Viable growth corridors that deserve deeper relationship-building.
+          - **0–39** → Communities already surrounded by school options.
+
+          Pair high EDI with strong HPFI and K-12 population to focus marketing, transportation planning, and church partnerships.
+          """)
     
     # Load data
     with st.spinner("Loading Census block group data..."):
@@ -583,14 +592,19 @@ def main():
     # Add helpful info about the data
     with st.expander("ℹ️ About This Data", expanded=False):
         st.write(f"""
-        **Philadelphia Block Group Data:**
-        - Total block groups: {len(demographics):,}
-        - Total K-12 population: {demographics['k12_pop'].sum():,.0f}
-        - Block groups with students: {(demographics['k12_pop'] > 0).sum():,}
-        - Non-residential areas (0 pop): {(demographics['total_pop'] == 0).sum():,}
-        
-        **Note:** Many block groups have 0 K-12 students because they are parks, commercial zones, 
-        industrial areas, or retirement communities. Use the "Optional Filters" to hide these areas.
+        **Geography:** {len(demographics):,} Philadelphia Census block groups (ACS 2022 five-year estimates).
+
+        **Enrollment Signals:**
+        - Total K-12 students: {demographics['k12_pop'].sum():,.0f}
+        - Blocks with school-age children: {(demographics['k12_pop'] > 0).sum():,}
+        - Blocks flagged as non-residential (0 population): {(demographics['total_pop'] == 0).sum():,}
+
+        **Sources & Refresh:**
+        - Student demand, household income, poverty, and first-generation metrics originate from Census ACS tables.
+        - School supply layers pair CCA campuses with NCES public/private school directories.
+        - Use the **Live Census Data** control to pull fresh ACS figures when the API key is available.
+
+        Tip: apply the optional filters to remove industrial corridors and highlight neighborhoods where CCA families live today.
         """)
     
     # Sidebar filters
