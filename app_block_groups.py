@@ -788,39 +788,49 @@ def main():
     )
     
     # Calculate EDI if needed
-    if not demographics_filtered.empty and not census_schools.empty:
-        with st.spinner("Calculating Educational Desert Index..."):
-            try:
-                # Only calculate EDI for block groups with actual population
-                demographics_with_pop = demographics_filtered[demographics_filtered['total_pop'] > 0].copy()
-                
-                if len(demographics_with_pop) > 0:
-                    edi_df = compute_edi_block_groups(demographics_with_pop, census_schools)
-                    # Merge EDI back to all demographics (including 0-pop areas)
-                    demographics_filtered = demographics_filtered.merge(
-                        edi_df[['block_group_id', 'EDI']], 
-                        on='block_group_id', 
-                        how='left'
-                    )
-                    # Fill NaN EDI values (for 0-pop areas) with a low score
+    if not demographics_filtered.empty:
+        if not census_schools.empty:
+            with st.spinner("Calculating Educational Desert Index..."):
+                try:
+                    demographics_with_pop = demographics_filtered[demographics_filtered['total_pop'] > 0].copy()
+
+                    if len(demographics_with_pop) > 0:
+                        edi_df = compute_edi_block_groups(demographics_with_pop, census_schools)
+                        demographics_filtered = demographics_filtered.merge(
+                            edi_df[['block_group_id', 'EDI']],
+                            on='block_group_id',
+                            how='left'
+                        )
+                        demographics_filtered = demographics_filtered.copy()
+                        demographics_filtered['EDI'] = demographics_filtered['EDI'].fillna(0.0)
+                    else:
+                        demographics_filtered = demographics_filtered.copy()
+                        demographics_filtered['EDI'] = 0.0
+                except Exception as e:
+                    st.sidebar.warning(f"⚠️ EDI calculation issue: {str(e)[:100]}")
                     demographics_filtered = demographics_filtered.copy()
-                    demographics_filtered['EDI'] = demographics_filtered['EDI'].fillna(0.0)
-                else:
-                    demographics_filtered = demographics_filtered.copy()
-                    demographics_filtered['EDI'] = 0.0
-            except Exception as e:
-                st.sidebar.warning(f"⚠️ EDI calculation issue: {str(e)[:100]}")
-                # Use a simple distance-based proxy for EDI
-                demographics_filtered = demographics_filtered.copy()
-                def simple_edi(row):
-                    if row.get('total_pop', 0) == 0:
-                        return 0.0  # No population = not a desert, just uninhabited
-                    min_dist = min([haversine_km(row['lat'], row['lon'], c['lat'], c['lon']) 
-                                   for _, c in cca_campuses.iterrows()])
-                    return min(100, min_dist * 5)  # Simple distance-based score
-                demographics_filtered['EDI'] = demographics_filtered.apply(simple_edi, axis=1)
-        
-        # Calculate marketing priority
+                    def simple_edi(row):
+                        if row.get('total_pop', 0) == 0:
+                            return 0.0
+                        min_dist = min([
+                            haversine_km(row['lat'], row['lon'], c['lat'], c['lon'])
+                            for _, c in cca_campuses.iterrows()
+                        ])
+                        return min(100, min_dist * 5)
+                    demographics_filtered['EDI'] = demographics_filtered.apply(simple_edi, axis=1)
+        else:
+            st.sidebar.info("No Census school landmarks loaded; using a distance-based EDI estimate.")
+            demographics_filtered = demographics_filtered.copy()
+            def simple_edi(row):
+                if row.get('total_pop', 0) == 0:
+                    return 0.0
+                min_dist = min([
+                    haversine_km(row['lat'], row['lon'], c['lat'], c['lon'])
+                    for _, c in cca_campuses.iterrows()
+                ])
+                return min(100, min_dist * 5)
+            demographics_filtered['EDI'] = demographics_filtered.apply(simple_edi, axis=1)
+
         demographics_filtered = demographics_filtered.copy()
         demographics_filtered['marketing_priority'] = calculate_marketing_priority_bg(demographics_filtered, cca_campuses)
 
