@@ -78,9 +78,14 @@ def load_census_schools(
     output_path: Path | str = CACHE_PATH,
     force_refresh: bool = False,
 ) -> pd.DataFrame:
+    """Load census school data with graceful fallback for cloud deployment.
+    
+    Returns empty DataFrame if data cannot be loaded - census schools are optional.
+    """
     counties = tuple(counties) if counties else DEFAULT_COUNTIES
     output_path = Path(output_path)
 
+    # Try to load from cache first
     if output_path.exists() and not force_refresh:
         try:
             df = pd.read_csv(output_path)
@@ -89,20 +94,32 @@ def load_census_schools(
         except Exception:
             pass
 
-    config = SchoolConfig(year=year, state=state, counties=counties, output_path=output_path, force_refresh=force_refresh)
-    frames = []
-    for county in counties:
-        gdf = _fetch_county_points(config, county)
-        frame = _filter_school_points(gdf)
-        if not frame.empty:
-            frames.append(frame)
+    # Try to fetch from Census TIGER (may fail on Streamlit Cloud due to network restrictions)
+    try:
+        config = SchoolConfig(year=year, state=state, counties=counties, output_path=output_path, force_refresh=force_refresh)
+        frames = []
+        for county in counties:
+            try:
+                gdf = _fetch_county_points(config, county)
+                frame = _filter_school_points(gdf)
+                if not frame.empty:
+                    frames.append(frame)
+            except Exception:
+                # Skip this county if download fails
+                continue
 
-    if not frames:
-        raise RuntimeError("No Census school landmarks found; verify county codes or year.")
+        if frames:
+            merged = _normalise_and_merge(frames)
+            try:
+                merged.to_csv(output_path, index=False)
+            except Exception:
+                pass  # Can't write cache on Streamlit Cloud, continue anyway
+            return merged
+    except Exception:
+        pass
 
-    merged = _normalise_and_merge(frames)
-    merged.to_csv(output_path, index=False)
-    return merged
+    # Return empty DataFrame with correct structure (census schools are optional)
+    return pd.DataFrame(columns=["lat", "lon", "school_name", "type", "capacity"])
 
 
 def main(argv: Sequence[str] | None = None) -> int:
