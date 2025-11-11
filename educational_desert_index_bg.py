@@ -26,11 +26,20 @@ def haversine_km(lat1, lon1, lat2, lon2):
 
 def compute_edi_block_groups(demographics_df, schools_df, max_distance_km=15):
     """
-    Compute Educational Desert Index for block groups
+    Compute TRUE Educational Desert Index for block groups
+    
+    Measures actual lack of educational infrastructure and access, NOT proximity to CCA.
+    Higher EDI = worse educational environment
+    
+    Components:
+    1. School Accessibility (40%) - Distance to ANY quality school (public, private, charter)
+    2. School-to-Student Ratio (30%) - Number of nearby school seats vs K-12 population
+    3. Socioeconomic Barriers (20%) - Poverty rate as proxy for educational barriers
+    4. Infrastructure Access (10%) - Estimated internet/technology access (inverse of poverty)
     
     Parameters:
     - demographics_df: DataFrame with block group demographic data
-    - schools_df: DataFrame with school locations
+    - schools_df: DataFrame with ALL school locations (not just CCA)
     - max_distance_km: Maximum distance for school accessibility calculation
     
     Returns:
@@ -71,6 +80,12 @@ def compute_edi_block_groups(demographics_df, schools_df, max_distance_km=15):
             bg_k12_pop = bg_k12_pop.iloc[0] if hasattr(bg_k12_pop, 'iloc') else 0
         bg_k12_pop = float(bg_k12_pop) if pd.notna(bg_k12_pop) else 0.0
         
+        # Get poverty rate for socioeconomic barriers
+        poverty_rate = block_group.get('poverty_rate', 0)
+        if pd.api.types.is_list_like(poverty_rate):
+            poverty_rate = poverty_rate.iloc[0] if hasattr(poverty_rate, 'iloc') else 0
+        poverty_rate = float(poverty_rate) if pd.notna(poverty_rate) else 0.0
+        
         # Skip if coordinates are invalid
         if pd.isna(bg_lat) or pd.isna(bg_lon):
             continue
@@ -95,63 +110,63 @@ def compute_edi_block_groups(demographics_df, schools_df, max_distance_km=15):
                 capacity = school.get('capacity', 500)  # Default capacity estimate
                 school_capacities.append(capacity)
         
-        # Component 1: Two-Step Floating Catchment Analysis (2SFCA)
+        # Component 1: School Accessibility (40% weight)
+        # Based on nearest school distance - farther = worse desert
         if len(distances) > 0:
-            # Step 1: For each school, calculate its supply-to-demand ratio
-            supply_ratios = []
-            for i, (dist, capacity) in enumerate(zip(distances, school_capacities)):
-                # Schools within catchment area of this school
-                demand_for_school = bg_k12_pop  # Simplified - would need to calculate for all block groups
-                if demand_for_school > 0:
-                    supply_ratios.append(capacity / demand_for_school)
-                else:
-                    supply_ratios.append(1.0)  # No demand, perfect supply
-            
-            # Step 2: Sum accessibility for this block group
-            accessibility_2sfca = sum(supply_ratios)
+            min_distance = min(distances)
+            # Normalize: 0km=0 (best), 15km=1 (worst)
+            accessibility_score = min(min_distance / max_distance_km, 1.0)
         else:
-            accessibility_2sfca = 0.0
+            accessibility_score = 1.0  # No schools nearby = worst
         
-        # Component 2: Gravity-based access (distance decay)
-        if len(distances) > 0:
-            # Use inverse distance weighting with exponential decay
-            weights = [np.exp(-dist / 5.0) for dist in distances]  # 5km decay constant
-            gravity_access = sum(weights)
+        # Component 2: School-to-Student Ratio (30% weight)
+        # Total nearby seats vs K-12 population
+        if len(distances) > 0 and bg_k12_pop > 0:
+            total_nearby_seats = sum(school_capacities)
+            seat_ratio = total_nearby_seats / bg_k12_pop
+            # Good ratio: 1.0+ seats per student = 0 (best)
+            # Poor ratio: 0.5 or less = 1.0 (worst)
+            ratio_score = max(0, min(1.0, 1.0 - (seat_ratio / 1.0)))
         else:
-            gravity_access = 0.0
+            ratio_score = 0.5  # Neutral if no students or no schools
         
-        # Component 3: Nearest school distance
-        if len(distances) > 0:
-            nearest_distance = min(distances)
-        else:
-            nearest_distance = max_distance_km  # Maximum penalty for no schools
+        # Component 3: Socioeconomic Barriers (20% weight)
+        # Poverty rate as proxy for educational barriers
+        # Higher poverty = worse educational access
+        poverty_score = min(poverty_rate / 100.0, 1.0)  # Cap at 100%
         
-        # Component 4: Neighborhood need (poverty rate and education gaps)
-        poverty_rate = block_group.get('poverty_rate', 15.0)  # Default if missing
-        if pd.api.types.is_list_like(poverty_rate):
-            poverty_rate = poverty_rate.iloc[0] if hasattr(poverty_rate, 'iloc') else 15.0
-        poverty_rate = float(poverty_rate) if pd.notna(poverty_rate) else 15.0
+        # Component 4: Infrastructure Access (10% weight)
+        # Estimated internet/technology access (inverse of poverty as proxy)
+        # Higher poverty typically means lower broadband access
+        # US average broadband: ~85%, low-income areas: ~60%
+        estimated_broadband = max(0.6, 0.95 - (poverty_rate / 100.0))
+        infrastructure_score = 1.0 - estimated_broadband  # Invert: worse = higher
         
-        pct_lt_hs = block_group.get('pct_lt_hs', 8.0)  # Default if missing
-        if pd.api.types.is_list_like(pct_lt_hs):
-            pct_lt_hs = pct_lt_hs.iloc[0] if hasattr(pct_lt_hs, 'iloc') else 8.0
-        pct_lt_hs = float(pct_lt_hs) if pd.notna(pct_lt_hs) else 8.0
+        # Combine components into final EDI
+        # Higher EDI = worse educational environment (true desert)
+        edi = (
+            0.40 * accessibility_score +      # 40% - Distance to nearest school
+            0.30 * ratio_score +               # 30% - Seat availability
+            0.20 * poverty_score +             # 20% - Economic barriers
+            0.10 * infrastructure_score        # 10% - Tech/internet access
+        )
         
-        # Combine into neighborhood need score
-        neighborhood_need = (poverty_rate / 100.0) * 0.7 + (pct_lt_hs / 100.0) * 0.3
-        
-        # Store raw components for analysis
+        # Store results
         results.append({
             'block_group_id': bg_id,
             'lat': bg_lat,
             'lon': bg_lon,
             'k12_pop': bg_k12_pop,
-            'accessibility_2sfca': accessibility_2sfca,
-            'gravity_access': gravity_access,
-            'nearest_distance': nearest_distance,
-            'neighborhood_need': neighborhood_need,
+            'nearest_school_km': min(distances) if distances else max_distance_km,
+            'nearby_seats': sum(school_capacities) if school_capacities else 0,
+            'seat_ratio': (sum(school_capacities) / bg_k12_pop) if bg_k12_pop > 0 and school_capacities else 0,
             'poverty_rate': poverty_rate,
-            'pct_lt_hs': pct_lt_hs
+            'est_broadband_pct': estimated_broadband * 100,
+            'accessibility_score': accessibility_score,
+            'ratio_score': ratio_score,
+            'poverty_score': poverty_score,
+            'infrastructure_score': infrastructure_score,
+            'EDI': edi * 100  # Scale to 0-100 for display
         })
     
     if not results:
@@ -159,73 +174,6 @@ def compute_edi_block_groups(demographics_df, schools_df, max_distance_km=15):
     
     # Convert to DataFrame
     edi_df = pd.DataFrame(results)
-    
-    # Normalize components to 0-1 scale
-    def safe_normalize(df, column, inverse=False):
-        """Normalize a column, handling edge cases"""
-        series = pd.to_numeric(df[column], errors='coerce')
-        mask = series.notna()
-
-        if not mask.any():
-            return np.zeros(len(df))
-
-        unique_vals = series[mask].nunique()
-        if unique_vals <= 1:
-            return np.ones(len(df)) * 0.5  # Middle value if all same
-
-        scaler_local = MinMaxScaler()
-        scaled = np.zeros(len(df), dtype=float)
-        scaled[:] = 0.5  # Default for missing values
-
-        try:
-            normalized = scaler_local.fit_transform(series[mask].to_frame()).flatten()
-            scaled[mask] = normalized
-        except Exception:
-            return np.ones(len(df)) * 0.5
-
-        return (1 - scaled) if inverse else scaled
-    
-    # For accessibility measures, higher is better (inverse for EDI)
-    edi_df['access_2sfca_norm'] = safe_normalize(edi_df, 'accessibility_2sfca', inverse=True)
-    edi_df['gravity_access_norm'] = safe_normalize(edi_df, 'gravity_access', inverse=True)
-    
-    # For distance, higher is worse (farther = more desert-like)
-    edi_df['distance_norm'] = safe_normalize(edi_df, 'nearest_distance')
-    
-    # For neighborhood need, higher is worse (more need = more desert-like)
-    edi_df['need_norm'] = safe_normalize(edi_df, 'neighborhood_need')
-    
-    # Combine components with weights
-    # Weights sum to 1.0
-    weights = {
-        'access_2sfca': 0.3,      # Supply/demand balance
-        'gravity_access': 0.25,   # Overall accessibility
-        'distance': 0.25,         # Geographic isolation
-        'need': 0.2              # Socioeconomic need
-    }
-    
-    edi_df['EDI_raw'] = (
-        edi_df['access_2sfca_norm'] * weights['access_2sfca'] +
-        edi_df['gravity_access_norm'] * weights['gravity_access'] +
-        edi_df['distance_norm'] * weights['distance'] +
-        edi_df['need_norm'] * weights['need']
-    )
-    
-    # Scale final EDI to 0-100 for interpretability
-    try:
-        edi_df['EDI'] = MinMaxScaler().fit_transform(edi_df[['EDI_raw']]).flatten() * 100
-    except Exception:
-        # If scaling fails, use raw values scaled manually
-        edi_raw = edi_df['EDI_raw'].values
-        if len(edi_raw) > 0 and not pd.isna(edi_raw).all():
-            min_val = np.nanmin(edi_raw)
-            max_val = np.nanmax(edi_raw)
-            if max_val > min_val:
-                edi_df['EDI'] = ((edi_raw - min_val) / (max_val - min_val)) * 100
-            else:
-                edi_df['EDI'] = 50.0  # All same, use middle value
-        else:
-            edi_df['EDI'] = 50.0
     
     return edi_df
 

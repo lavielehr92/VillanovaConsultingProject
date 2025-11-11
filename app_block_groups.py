@@ -1036,23 +1036,26 @@ def main():
     # Add explanation of EDI in an expandable section
     with st.expander("ℹ️ Understanding the Educational Desert Index (EDI)"):
         st.markdown("""
-        ### Why CCA Tracks EDI
+        ### What EDI Measures
 
-        The Educational Desert Index identifies neighborhoods where families have limited access to affordable, quality Christian education options. **Higher EDI scores indicate areas with greater opportunity for CCA to make an impact.**
+        The Educational Desert Index identifies neighborhoods with **limited access to quality educational infrastructure**. Unlike proximity-based measures, EDI considers distance to ANY quality school (public, private, charter), available seats, socioeconomic barriers, and estimated internet access.
+
+        **Higher EDI scores = worse educational environment** (true educational deserts).
 
         #### How We Calculate It
-        1. **Accessible Seats (55%)** – Compares nearby K-12 demand with available CCA or partner seats. Limited capacity increases the score.
-        2. **Travel Accessibility (25%)** – Rewards proximity to a CCA campus; distance or transit barriers increase EDI.
-        3. **Community Opportunity (20%)** – Considers economic factors and educational attainment to identify underserved areas.
+        1. **Accessibility (40%)** – Distance to the nearest quality school. Farther distances increase EDI.
+        2. **Seat Availability (30%)** – Ratio of total nearby school seats to K-12 population. Fewer seats per student increases EDI.
+        3. **Socioeconomic Barriers (20%)** – Poverty rate. Higher poverty increases EDI.
+        4. **Infrastructure (10%)** – Estimated broadband access (proxy via inverse poverty). Lower access increases EDI.
 
-        Each component is scaled 0–1 and combined, then translated to a 0–100 score for clarity.
+        Each component is scaled 0–1 and combined into a 0–100 score.
 
         #### Reading the Score
-        - **70–100** → Highest opportunity areas for strategic outreach and engagement.
-        - **40–69** → Viable growth corridors for relationship-building and community partnerships.
-        - **0–39** → Communities with existing educational options already available.
+        - **70–100** → True educational deserts with limited school access, few seats, high poverty, poor infrastructure.
+        - **40–69** → Moderate educational challenges; some infrastructure gaps.
+        - **0–39** → Well-served communities with good school access, sufficient capacity, better infrastructure.
 
-        Combine high EDI with strong HPFI and K-12 population to focus marketing, transportation planning, and partnership development.
+        Use EDI to identify underserved areas where CCA can make the greatest impact by filling real educational gaps.
         """)
     
     # Load data
@@ -1609,14 +1612,16 @@ def main():
         with st.expander("How the Educational Desert Index (EDI) is calculated", expanded=False):
             st.markdown(
                 """
-                **Four inputs (each scaled 0-1) feed the composite score:**
+                **Four components (scaled 0-1) feed the composite score:**
 
-                1. **Supply vs. Demand (30%)** – Two-Step Floating Catchment Analysis compares local K-12 student demand to available CCA or partner seats. Higher student-to-seat ratios increase EDI.
-                2. **Gravity-Based Access (25%)** – Nearer campuses receive higher weights using an exponential distance decay. Areas far from any campus score higher (worse).
-                3. **Nearest Campus Distance (25%)** – The straight-line distance (km) to the closest CCA campus. Longer travel distances raise EDI.
-                4. **Neighborhood Need (20%)** – Combines poverty rate (70%) and adults without a high school diploma (30%). Higher need lifts EDI.
+                1. **Accessibility (40%)** – Distance to the nearest quality school (public, private, charter). Normalized from 0-15km. Farther = higher EDI.
+                2. **Seat Availability (30%)** – Ratio of total nearby school seats (within catchment area) to K-12 population. Fewer seats per student = higher EDI.
+                3. **Socioeconomic Barriers (20%)** – Poverty rate from Census data. Higher poverty = higher EDI.
+                4. **Infrastructure (10%)** – Estimated broadband access (proxy using inverse of poverty rate). Lower access = higher EDI.
 
-                The components are blended and re-scaled to a 0–100 range. Higher EDI values indicate stronger Educational Desert conditions (high need + low access).
+                EDI = (0.40 × accessibility) + (0.30 × seat_ratio) + (0.20 × poverty) + (0.10 × infrastructure), scaled 0–100.
+                
+                **Higher EDI = true educational desert** (far from schools, low capacity, high poverty, poor infrastructure).
                 """
             )
 
