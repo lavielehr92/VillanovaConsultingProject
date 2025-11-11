@@ -946,30 +946,35 @@ def create_choropleth_map(
         hover_cols = ['school_name', 'type', 'grade_band', 'tuition_display', 'capacity_display', 'address', 'notes']
         custom_comp = comp_copy[hover_cols].fillna('').to_numpy()
 
-        fig.add_scattermapbox(
-            lat=comp_copy['lat'].tolist(),
-            lon=comp_copy['lon'].tolist(),
-            mode='markers',
-            marker=dict(
-                size=14,
-                symbol='diamond',
-                color=comp_copy['color'].tolist(),
-                opacity=0.95,
-                line=dict(width=2, color='white')
-            ),
-            customdata=custom_comp,
-            hovertemplate=(
-                "<b>%{customdata[0]}</b><br>"
-                "Type: %{customdata[1]}<br>"
-                "Grades: %{customdata[2]}<br>"
-                "Tuition: %{customdata[3]}<br>"
-                "Seats: %{customdata[4]}<br>"
-                "Address: %{customdata[5]}<br>"
-                "%{customdata[6]}<extra></extra>"
-            ),
-            name='Competitor Schools',
-            zorder=10
-        )
+        # Ensure no NaN values in coordinates or colors
+        valid_idx = comp_copy['lat'].notna() & comp_copy['lon'].notna() & comp_copy['color'].notna()
+        if valid_idx.sum() > 0:
+            comp_valid = comp_copy[valid_idx].copy()
+            custom_valid = custom_comp[valid_idx.values]
+            
+            fig.add_scattermapbox(
+                lat=comp_valid['lat'].tolist(),
+                lon=comp_valid['lon'].tolist(),
+                mode='markers',
+                marker=dict(
+                    size=14,
+                    symbol='diamond',
+                    color=comp_valid['color'].tolist(),
+                    opacity=0.95,
+                    line=dict(width=2, color='white')
+                ),
+                customdata=custom_valid,
+                hovertemplate=(
+                    "<b>%{customdata[0]}</b><br>"
+                    "Type: %{customdata[1]}<br>"
+                    "Grades: %{customdata[2]}<br>"
+                    "Tuition: %{customdata[3]}<br>"
+                    "Seats: %{customdata[4]}<br>"
+                    "Address: %{customdata[5]}<br>"
+                    "%{customdata[6]}<extra></extra>"
+                ),
+                name='Competitor Schools'
+            )
     
     return fig
 
