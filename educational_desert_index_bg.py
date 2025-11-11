@@ -234,4 +234,4 @@ if __name__ == "__main__":
     print("EDI calculation completed successfully!")
     print(f"Calculated EDI for {len(edi_result)} block groups")
     print("\nSample results:")
-    print(edi_result[['block_group_id', 'EDI', 'nearest_distance']].head())
+    print(edi_result[['block_group_id', 'EDI', 'nearest_school_km', 'seat_ratio', 'poverty_rate']].head())
