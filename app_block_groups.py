@@ -911,7 +911,7 @@ def create_choropleth_map(
         }
         comp_copy = competition_df.copy()
         comp_copy['type'] = comp_copy['type'].fillna('Other')
-        comp_copy['color'] = comp_copy['type'].map(lambda t: palette.get(t, '#2CA02C'))
+        comp_copy['color'] = comp_copy['type'].apply(lambda t: palette.get(t, '#2CA02C'))
         comp_copy['capacity'] = pd.to_numeric(comp_copy.get('capacity'), errors='coerce')
 
         def grade_band(label: object) -> str:
