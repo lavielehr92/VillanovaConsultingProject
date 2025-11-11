@@ -445,9 +445,8 @@ st.markdown("""
 def compute_hpfi_scores(df: pd.DataFrame, edi_col: str = "EDI") -> pd.DataFrame:
     """Attach High-Potential Family Index (0-1) to the provided DataFrame.
     
-    Tuned to prioritize tuition-paying potential through higher income weighting
-    and inverse poverty signal, supporting CCA's goal to expand reach to families
-    able to afford tuition while maintaining socioeconomic diversity.
+    Tuned to prioritize tuition-paying potential through higher income weighting,
+    inverse poverty signal, and proximity to CCA campuses to support growth strategy.
     """
 
     def normalise(series: pd.Series) -> pd.Series:
@@ -458,6 +457,13 @@ def compute_hpfi_scores(df: pd.DataFrame, edi_col: str = "EDI") -> pd.DataFrame:
         return pd.Series(scaled, index=series.index)
 
     working = df.copy()
+    
+    # CCA Campus locations
+    cca_campuses = pd.DataFrame({
+        'name': ['West Oak Lane', 'Hunting Park'],
+        'lat': [40.056339, 40.015278],
+        'lon': [-75.153858, -75.138889]
+    })
 
     candidate_names = []
     if isinstance(edi_col, str):
@@ -491,23 +497,42 @@ def compute_hpfi_scores(df: pd.DataFrame, edi_col: str = "EDI") -> pd.DataFrame:
 
     edi_values = pd.to_numeric(edi_series, errors="coerce").fillna(0.0)
     inverse_edi = 1.0 - (edi_values / 100.0).clip(lower=0.0, upper=1.0)
+    
+    # Campus proximity score (closer = higher HPFI)
+    proximity_scores = []
+    for _, row in working.iterrows():
+        if pd.notna(row.get('lat')) and pd.notna(row.get('lon')):
+            min_dist = min([
+                haversine_km(row['lat'], row['lon'], campus['lat'], campus['lon'])
+                for _, campus in cca_campuses.iterrows()
+            ])
+            # Convert to score: 0km=1.0, 20km=0.0, exponential decay
+            proximity_score = np.exp(-min_dist / 8.0)  # 8km half-life
+        else:
+            proximity_score = 0.0
+        proximity_scores.append(proximity_score)
+    
+    proximity_norm = normalise(pd.Series(proximity_scores, index=working.index))
 
-    # Updated weights prioritizing tuition-paying potential (NO first-gen)
+    # Updated weights including campus proximity
     weights = {
-        "income": 0.60,           # Increased - strongest tuition signal
-        "inverse_poverty": 0.25,  # Increased - economic stability signal
+        "income": 0.50,           # Primary tuition signal
+        "inverse_poverty": 0.20,  # Economic stability
+        "proximity": 0.15,        # NEW - Distance to CCA campuses
         "k12": 0.10,              # Market size
-        "inverse_edi": 0.05,      # Low competition signal
+        "inverse_edi": 0.05,      # Low competition
     }
 
     hpfi = (
         weights["income"] * income_norm +
         weights["inverse_poverty"] * inverse_poverty_norm +
+        weights["proximity"] * proximity_norm +
         weights["k12"] * k12_norm +
         weights["inverse_edi"] * inverse_edi
     )
 
     working["hpfi"] = hpfi.clip(0.0, 1.0)
+    working["nearest_campus_km"] = proximity_scores  # Store for reference
     return working
 
 @st.cache_data(ttl=3600)  # Cache for 1 hour, then reload
@@ -1049,7 +1074,7 @@ def main():
         1. **Accessibility (40%)** – Uses gravity-weighted school access model. Nearby schools count more than distant ones due to exponential distance decay (β=5km). Measures actual capacity availability, not just proximity.
         2. **School-to-Student Ratio (30%)** – Local capacity vs K-12 population using gravity-weighted catchment areas. Accounts for overcrowding and shared demand.
         3. **Socioeconomic Need (20%)** – Combines poverty rate (70%) and % adults without HS diploma (30%). Real barriers to educational access.
-        4. **Infrastructure (10%)** – Estimated broadband access (proxy via inverse poverty). Technology access for remote learning.
+        4. **Infrastructure (10%)** – Estimated broadband access using poverty as proxy (lower poverty areas have ~85-95% access, higher poverty ~60-70%). Future versions will use ACS S2801 broadband data when available.
 
         Each component is normalized 0–1 and weighted, then scaled to 0–100.
 
@@ -1728,13 +1753,12 @@ def main():
         if is_marketing_zones and 'marketing_zone' in demographics_filtered.columns:
             st.write("**Top Premium Growth Targets (High HPFI + Moderate EDI + Strong K12)**")
             premium_zones = demographics_filtered[demographics_filtered['marketing_zone'] == 'Premium Growth Target'].nlargest(10, 'hpfi')[
-                ['block_group_id', 'hpfi', 'EDI', 'income', 'first_gen_pct', 'k12_pop']
+                ['block_group_id', 'hpfi', 'EDI', 'income', 'k12_pop']
             ].copy()
             if len(premium_zones) > 0:
                 premium_zones['hpfi'] = premium_zones['hpfi'].map(lambda v: f"{v:.2f}")
                 premium_zones['EDI'] = premium_zones['EDI'].map(lambda v: f"{v:.2f}")
                 premium_zones['income'] = premium_zones['income'].map(lambda v: f"${v:,.0f}")
-                premium_zones['first_gen_pct'] = premium_zones['first_gen_pct'].map(lambda v: f"{v:.1f}%")
                 premium_zones['k12_pop'] = premium_zones['k12_pop'].map(lambda v: f"{int(v):,}")
                 st.dataframe(premium_zones, width='stretch', use_container_width=True)
             else:
@@ -1746,13 +1770,12 @@ def main():
         if is_overlay_mode and 'zone' in demographics_filtered.columns:
             st.write("**Top Golden Zones (EDI × HPFI Overlay)**")
             golden_zones = demographics_filtered[demographics_filtered['zone'] == 'Golden Zone'].nlargest(10, 'EDI')[
-                ['block_group_id', 'EDI', 'hpfi', 'income', 'first_gen_pct', 'k12_pop']
+                ['block_group_id', 'EDI', 'hpfi', 'income', 'k12_pop']
             ].copy()
             if len(golden_zones) > 0:
                 golden_zones['EDI'] = golden_zones['EDI'].map(lambda v: f"{v:.2f}")
                 golden_zones['hpfi'] = golden_zones['hpfi'].map(lambda v: f"{v:.2f}")
                 golden_zones['income'] = golden_zones['income'].map(lambda v: f"${v:,.0f}")
-                golden_zones['first_gen_pct'] = golden_zones['first_gen_pct'].map(lambda v: f"{v:.1f}%")
                 golden_zones['k12_pop'] = golden_zones['k12_pop'].map(lambda v: f"{int(v):,}")
                 st.dataframe(golden_zones, width='stretch', use_container_width=True)
             else:
@@ -1781,11 +1804,10 @@ def main():
             st.write("**Top 10 Block Groups by HPFI**")
             if 'hpfi' in demographics_filtered.columns:
                 top_hpfi = demographics_filtered.nlargest(10, 'hpfi')[
-                    ['block_group_id', 'hpfi', 'income', 'first_gen_pct', 'k12_pop']
+                    ['block_group_id', 'hpfi', 'income', 'k12_pop']
                 ].copy()
                 top_hpfi['hpfi'] = top_hpfi['hpfi'].map(lambda v: f"{v:.2f}")
                 top_hpfi['income'] = top_hpfi['income'].map(lambda v: f"${v:,.0f}")
-                top_hpfi['first_gen_pct'] = top_hpfi['first_gen_pct'].map(lambda v: f"{v:.1f}%")
                 st.dataframe(top_hpfi, width='stretch')
         
         # Export option
