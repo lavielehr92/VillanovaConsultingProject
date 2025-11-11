@@ -932,14 +932,14 @@ def main():
     validation_result = validate_k12_total(demographics, tract_enrollment_data)
     
     if not validation_result['is_valid']:
-        with st.error("⚠️ K-12 Enrollment Validation Warning"):
-            st.write(validation_result['warnings'][0])
-            if 'low_tracts' in validation_result:
-                st.write("**Tracts with lowest enrollment rates:**")
-                st.dataframe(validation_result['low_tracts'], use_container_width=True)
-            elif 'high_tracts' in validation_result:
-                st.write("**Tracts with highest enrollment rates:**")
-                st.dataframe(validation_result['high_tracts'], use_container_width=True)
+        st.error("⚠️ K-12 Enrollment Validation Warning")
+        st.write(validation_result['warnings'][0])
+        if 'low_tracts' in validation_result:
+            st.write("**Tracts with lowest enrollment rates:**")
+            st.dataframe(validation_result['low_tracts'], use_container_width=True)
+        elif 'high_tracts' in validation_result:
+            st.write("**Tracts with highest enrollment rates:**")
+            st.dataframe(validation_result['high_tracts'], use_container_width=True)
     else:
         if validation_result.get('messages'):
             st.success(validation_result['messages'][0])
