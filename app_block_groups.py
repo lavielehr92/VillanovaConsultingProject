@@ -1127,18 +1127,7 @@ def main():
     bg_cache_ts = k12_summary.get('bg_cache_timestamp', 'N/A')
     tract_cache_ts = k12_summary.get('tract_cache_timestamp', 'N/A')
 
-    st.sidebar.success(
-        f"ACS 2023 modeled K-12: {total_students_loaded:,.0f} students across {total_block_groups_loaded} block groups"
-    )
-    st.sidebar.caption(
-        f"Imputed block groups: {imputed_count}."
-    )
-    st.sidebar.caption(f"Cache: BG={bg_cache_ts[:10]} | Tract={tract_cache_ts[:10]}")
-    if imputed_count:
-        st.sidebar.warning("Modeled 0 students where ACS data was missing; check k12_imputed flag in exports.")
-    if legacy_total and not np.isnan(legacy_total):
-        st.sidebar.caption(f"Legacy CSV K-12 total (pre-ACS refresh): {legacy_total:,.0f}")
-
+    # Load school data
     try:
         competition_schools = load_competition_schools()
     except RuntimeError as exc:
@@ -1150,9 +1139,8 @@ def main():
     except RuntimeError as exc:
         st.error(f"Unable to load Census school landmarks: {exc}")
         census_schools = pd.DataFrame()
-    
-    st.success(f"✅ Loaded {len(gdf)} block groups, {len(census_schools)} Census schools, and {len(competition_schools)} competitor campuses")
 
+    # Prepare school data
     if not competition_schools.empty:
         if 'type' not in competition_schools.columns:
             competition_schools['type'] = 'Other'
@@ -1173,6 +1161,7 @@ def main():
     else:
         census_schools = pd.DataFrame(columns=['school_name', 'lat', 'lon', 'capacity'])
 
+    # Calculate seat capacity
     public_capacity = 0.0
     competitor_capacity = 0.0
 
@@ -1190,98 +1179,72 @@ def main():
     if total_students_value is not None and (public_capacity + competitor_capacity) > 0:
         student_per_combined_seat = total_students_value / (public_capacity + competitor_capacity)
 
-    public_ratio_text = f"{student_per_public_seat:.2f}" if student_per_public_seat is not None else "n/a"
-    combined_ratio_text = f"{student_per_combined_seat:.2f}" if student_per_combined_seat is not None else "n/a"
-    print(
-        f"[Supply] Public seats: {public_capacity:,.0f}; "
-        f"Competitor seats: {competitor_capacity:,.0f}; "
-        f"Students per public seat: {public_ratio_text}; "
-        f"Students per seat (with competitors): {combined_ratio_text}"
-    )
-
-    if student_per_public_seat is not None:
-        st.sidebar.info(
-            f"Public seat coverage: {public_capacity:,.0f} seats → {student_per_public_seat:.2f} students per seat"
-        )
-    else:
-        st.sidebar.warning("Public school capacity data missing or zero; cannot compute students per seat.")
-
-    st.sidebar.caption(
-        f"Competitor seats (not in EDI unless toggled): {competitor_capacity:,.0f}"
-    )
-    if student_per_combined_seat is not None:
-        st.sidebar.caption(
-            f"Combined seats (public + competitor): {public_capacity + competitor_capacity:,.0f} → {student_per_combined_seat:.2f} students per seat"
-        )
+    # ==================== SIDEBAR: DATA SUMMARY ====================
+    st.sidebar.title("🎯 CCA Growth Dashboard")
     
-    # Add helpful info about the data
-    with st.expander("ℹ️ About This Data & Methodology", expanded=False):
+    with st.sidebar.expander("📊 Market Overview", expanded=True):
+        st.metric(
+            "Total K-12 Students",
+            f"{total_students_loaded:,.0f}",
+            help="ACS 2023 modeled enrollment across Philadelphia block groups"
+        )
+        st.metric(
+            "Block Groups Analyzed",
+            f"{total_block_groups_loaded:,}"
+        )
+        
+        if student_per_public_seat is not None:
+            st.metric(
+                "Students per Public Seat",
+                f"{student_per_public_seat:.1f}:1",
+                help=f"{public_capacity:,.0f} public school seats available"
+            )
+        
+        st.caption(f"📅 Data: ACS 2023 | Updated {bg_cache_ts[:10]}")
+    
+    # Data Quality Details (collapsible)
+    with st.sidebar.expander("📋 Data Quality & Technical Details"):
         st.write(f"""
-        **Geographic Coverage:** {len(demographics):,} Philadelphia Census block groups (ACS 2023 five-year estimates).
-
-        **K-12 Student Modeling (ACS 2023):**
-        - **Block-group ages 5–17:** ACS table B01001 (population by age/sex), fields 004E-006E (male) + 028E-030E (female)
-        - **Tract-level enrollment:** ACS table S1401 (school enrollment), fields for kindergarten, grades 1-8, and grades 9-12
-        - **Downscaling method:** Each block group's K-12 estimate = (tract enrollment rate) × (block group age 5-17 population)
-        - **Quality flags:** All block groups marked as modeled; areas with missing data are imputed
-
-        **Growth Opportunity Metrics:**
-        - **Total K-12 students (modeled):** {demographics['k12_pop'].sum():,.0f} across Philadelphia
-        - **Residential block groups with children:** {(demographics['k12_pop'] > 0).sum():,} areas
-        - **Non-residential areas excluded by default:** {(demographics['total_pop'] == 0).sum():,} industrial/park zones
-
-        **High-Potential Family Index (HPFI):**
-        - **Purpose:** Identifies areas with strong tuition-paying capacity and alignment with CCA's mission
-        - **Components (updated weights for growth focus):**
-          - Household income: 50% (increased - primary economic signal)
-          - Inverse poverty: 15% (new - economic stability)
-          - First-generation %: 20% (mission alignment)
-          - K-12 population: 10% (market size)
-          - Inverse EDI: 5% (access factor)
-        - **Scale:** 0.00 (lowest potential) to 1.00 (highest potential)
-        - **Interpretation:** Higher HPFI indicates areas more likely to support tuition-based enrollment growth
-
-        **Educational Desert Index (EDI):**
-        - **Purpose:** Identifies areas where families have limited access to quality Christian education options
-        - **Default calculation:** Uses CCA campuses + NCES public schools only
-        - **Optional toggle:** Include charter/private schools in supply calculation
-        - **Fallback method:** Distance-based model if school data unavailable
-        - **Scale:** 0-100 (higher = greater access gap)
-
-        **Visualization Modes:**
-        1. **HPFI (Tuition Potential):** Highlights areas with economic capacity for tuition-based enrollment
-        2. **EDI (Access Opportunity):** Shows areas with limited Christian education options
-        3. **Overlay (EDI × HPFI):** 4-zone grid combining both metrics (Golden/Mission/Affluent/Low Priority)
-        4. **High-Potential Marketing Zones:** Custom segmentation optimized for growth strategy
-           - Premium Growth: High HPFI + Moderate EDI + Strong K12 population (top priority)
-           - Established Markets: High HPFI + Low EDI (affluent, well-served areas)
-           - Emerging Opportunity: Medium HPFI + Moderate EDI (development potential)
-           - Foundation Building: Other combinations (relationship development)
-
-        **Data Sources & Refresh:**
-        - **Census data:** ACS 2023 five-year estimates via Census Bureau API
-        - **School locations:** NCES directories + local private/charter school data
-        - **Update frequency:** Cache refreshes every 24 hours; use "Live Census Data" button for manual refresh
-        - **Cache storage:** data/cache/ directory with timestamps
-
-        **Tips for Analysis:**
-        - Combine map modes to identify balanced opportunities (access need + economic capacity)
-        - Use geographic filters to focus on accessible catchment areas
-        - Apply demographic filters to refine target audiences while maintaining inclusive outreach
-        - Export filtered data for deeper analysis or integration with CRM systems
+        **Data Validation:**
+        - Block groups with imputed K-12: {imputed_count:,}
+        - Cache timestamps: BG={bg_cache_ts[:10]}, Tract={tract_cache_ts[:10]}
+        """)
+        
+        if legacy_total and not np.isnan(legacy_total):
+            st.caption(f"Legacy CSV K-12 total (pre-ACS refresh): {legacy_total:,.0f}")
+        
+        st.write(f"""
+        **School Capacity:**
+        - Public seats: {public_capacity:,.0f}
+        - Competitor seats: {competitor_capacity:,.0f}
+        - Combined seats: {public_capacity + competitor_capacity:,.0f}
+        """)
+        
+        if student_per_combined_seat is not None:
+            st.caption(f"Students per seat (with competitors): {student_per_combined_seat:.2f}:1")
+        
+        st.write(f"""
+        **School Data Loaded:**
+        - Census public schools: {len(census_schools):,}
+        - Competition schools: {len(competition_schools):,}
         """)
     
-    # Sidebar filters
-    st.sidebar.header("🎛️ Filters & Controls")
-    st.sidebar.caption("Refine your view to identify high-potential growth areas")
+    # ==================== SIDEBAR: FILTERS ====================
+    st.sidebar.divider()
+    st.sidebar.header("🎯 Target Area Filters")
     
-    # Proximity filters
-    st.sidebar.subheader("📍 Geographic Scope")
-    max_distance = st.sidebar.slider(
-        "Radius from CCA Campuses (km)", 
-        1, 35, 15, 
-        help="Focus on block groups within this distance of CCA campuses to prioritize accessible communities"
-    )
+    # Geographic Filter
+    with st.sidebar.expander("📍 **Geographic Scope**", expanded=True):
+        max_distance = st.slider(
+            "Distance from CCA Campuses (km)",
+            min_value=1,
+            max_value=35,
+            value=15,
+            step=1,
+            help="Focus on block groups within this distance of CCA campuses",
+            key="distance_slider"
+        )
+        st.caption(f"✓ Showing areas within {max_distance}km of campuses")
     
     # CCA Campus locations
     cca_campuses = pd.DataFrame({
@@ -1301,145 +1264,166 @@ def main():
     
     demographics_filtered = demographics[demographics.apply(is_within_distance, axis=1)]
     
-    # Demographic filters
-    st.sidebar.subheader("💼 Opportunity Indicators")
-    st.sidebar.caption("Note: Median income represents the block group average. All income levels exist within each area, supporting diverse and inclusive outreach.")
-
     # Optional live data refresh (Census API)
     census_api_key = get_census_api_key()
     if fetch_live_block_groups and census_api_key:
-        with st.sidebar.expander("🔄 Live Census Data"):
-            st.write("You have a Census API key loaded. You can pull fresh ACS data.")
+        with st.sidebar.expander("🔄 Live Census Data Refresh"):
+            st.caption("Pull fresh ACS data from Census API")
             if st.button("Refresh From Census API", key="refresh_census"):
                 with st.spinner("Pulling live ACS data (may take ~30s)..."):
                     try:
                         fetch_live_block_groups()
-                        st.success("Live data downloaded. Please rerun (Ctrl+R) or click 'Rerun' above.")
+                        st.success("Live data downloaded. Please rerun the app to see updates.")
                     except Exception as e:
                         st.error(f"Live fetch failed: {e}")
     
     highlight_hpfi = False
 
     if not demographics_filtered.empty:
-        income_series = pd.to_numeric(demographics_filtered['income'], errors='coerce').dropna()
-        if income_series.empty:
-            income_floor, income_ceiling = 0, 250000
-        else:
-            income_floor = int(income_series.min())
-            income_ceiling = int(income_series.max())
-            if income_floor == income_ceiling:
-                income_ceiling = income_floor + 1
-
-        income_range = st.sidebar.slider(
-            "Household Income Range",
-            min_value=income_floor,
-            max_value=income_ceiling,
-            value=(income_floor, income_ceiling),
-            step=1000,
-            format="$%d",
-            help="Target areas by economic capacity - higher incomes may indicate tuition-paying potential"
-        )
-        demographics_filtered = demographics_filtered[
-            demographics_filtered['income'].between(income_range[0], income_range[1], inclusive="both")
-        ]
-
-        highlight_hpfi = st.sidebar.checkbox(
-            "Focus on High-Potential Family Index (HPFI ≥ 0.75)", 
-            value=False,
-            help="Narrow view to top-quartile HPFI areas indicating strong tuition-paying potential"
-        )
-
-        # Additional demographic filters (optional)
-        st.sidebar.subheader("🔧 Refinement Options")
-        
-        # Filter out non-residential block groups
-        hide_zero_pop = st.sidebar.checkbox(
-            "Exclude Non-Residential Areas", 
-            value=True,
-            help="Removes parks, industrial zones, etc. with 0 population to focus on residential communities"
-        )
-        if hide_zero_pop:
-            before_count = len(demographics_filtered)
-            demographics_filtered = demographics_filtered[demographics_filtered['total_pop'] > 0].copy()
-            removed = before_count - len(demographics_filtered)
-            if removed > 0:
-                st.sidebar.info(f"✓ Filtered out {removed} non-residential block groups")
-            
-            # Also show how many remain with 0 K-12 pop (residential but no children)
-            zero_k12 = len(demographics_filtered[demographics_filtered['k12_pop'] == 0])
-            if zero_k12 > 0:
-                st.sidebar.caption(f"ℹ️ {zero_k12} residential blocks have 0 K-12 children")
-        
-        # Additional filter for 0 K-12 population
-        hide_zero_k12 = st.sidebar.checkbox(
-            "Exclude Areas with 0 K-12 Children",
-            value=False,
-            help="Focuses exclusively on areas with school-age population for targeted marketing"
-        )
-        if hide_zero_k12:
-            before_count = len(demographics_filtered)
-            demographics_filtered = demographics_filtered[demographics_filtered['k12_pop'] > 0].copy()
-            removed = before_count - len(demographics_filtered)
-            if removed > 0:
-                st.sidebar.info(f"✓ Filtered out {removed} additional blocks with 0 K-12 children")
-        
-        # Poverty rate filter - now optional and off by default
-        apply_poverty_filter = st.sidebar.checkbox("Apply Economic Opportunity Filter", value=False)
-        if apply_poverty_filter:
-            # Get valid poverty rates (exclude NaN values)
-            valid_poverty = demographics_filtered['poverty_rate'].dropna()
-            if len(valid_poverty) > 0:
-                poverty_range = st.sidebar.slider(
-                    "Economic Stability Range (inverse poverty %)", 
-                    float(valid_poverty.min()), 
-                    float(valid_poverty.max()), 
-                    (float(valid_poverty.min()), float(valid_poverty.max())),
-                    step=1.0,
-                    help="Lower poverty rates may indicate greater economic capacity"
-                )
-                demographics_filtered = demographics_filtered[
-                    (demographics_filtered['poverty_rate'] >= poverty_range[0]) &
-                    (demographics_filtered['poverty_rate'] <= poverty_range[1])
-                ]
+        # Income Filter
+        with st.sidebar.expander("💰 **Income Targeting**", expanded=False):
+            income_series = pd.to_numeric(demographics_filtered['income'], errors='coerce').dropna()
+            if income_series.empty:
+                income_floor, income_ceiling = 0, 250000
             else:
-                st.sidebar.warning("No valid economic data available")
+                income_floor = int(income_series.min())
+                income_ceiling = int(income_series.max())
+                if income_floor == income_ceiling:
+                    income_ceiling = income_floor + 1
+
+            income_range = st.slider(
+                "Median Household Income Range",
+                min_value=income_floor,
+                max_value=income_ceiling,
+                value=(income_floor, income_ceiling),
+                step=1000,
+                format="$%d",
+                help="Target areas by economic capacity"
+            )
+            demographics_filtered = demographics_filtered[
+                demographics_filtered['income'].between(income_range[0], income_range[1], inclusive="both")
+            ]
+            st.caption(f"✓ Showing incomes from ${income_range[0]:,} to ${income_range[1]:,}")
+
+        # HPFI Focus
+        with st.sidebar.expander("🎯 **High-Potential Focus**", expanded=False):
+            highlight_hpfi = st.checkbox(
+                "Show Only High HPFI Areas (≥ 0.75)", 
+                value=False,
+                help="Focus on top-quartile areas with strongest tuition-paying potential"
+            )
+            if highlight_hpfi:
+                st.caption("✓ Filtering to premium growth opportunities")
+
+        # Refinement Options
+        with st.sidebar.expander("🔧 **Refinement Options**", expanded=False):
+            # Filter out non-residential block groups
+            hide_zero_pop = st.checkbox(
+                "Exclude Non-Residential Areas", 
+                value=True,
+                help="Removes parks, industrial zones with 0 population"
+            )
+            if hide_zero_pop:
+                before_count = len(demographics_filtered)
+                demographics_filtered = demographics_filtered[demographics_filtered['total_pop'] > 0].copy()
+                removed = before_count - len(demographics_filtered)
+                if removed > 0:
+                    st.caption(f"✓ Filtered out {removed} non-residential blocks")
+            
+            # Additional filter for 0 K-12 population
+            hide_zero_k12 = st.checkbox(
+                "Exclude Areas with 0 K-12 Children",
+                value=False,
+                help="Focus exclusively on areas with school-age population"
+            )
+            if hide_zero_k12:
+                before_count = len(demographics_filtered)
+                demographics_filtered = demographics_filtered[demographics_filtered['k12_pop'] > 0].copy()
+                removed = before_count - len(demographics_filtered)
+                if removed > 0:
+                    st.caption(f"✓ Filtered out {removed} blocks with 0 K-12 children")
+            
+            # Poverty rate filter - now optional and off by default
+            apply_poverty_filter = st.checkbox("Apply Economic Opportunity Filter", value=False)
+            if apply_poverty_filter:
+                valid_poverty = demographics_filtered['poverty_rate'].dropna()
+                if len(valid_poverty) > 0:
+                    poverty_range = st.slider(
+                        "Economic Stability Range (inverse poverty %)", 
+                        float(valid_poverty.min()), 
+                        float(valid_poverty.max()), 
+                        (float(valid_poverty.min()), float(valid_poverty.max())),
+                        step=1.0,
+                        help="Lower poverty rates may indicate greater economic capacity"
+                    )
+                    demographics_filtered = demographics_filtered[
+                        (demographics_filtered['poverty_rate'] >= poverty_range[0]) &
+                        (demographics_filtered['poverty_rate'] <= poverty_range[1])
+                    ]
+                else:
+                    st.warning("No valid economic data available")
         
     else:
         st.info("📍 No block groups found within the specified radius. Try expanding your geographic scope.")
         demographics_filtered = demographics.iloc[0:0]
         
-    # Map display options
-    st.sidebar.subheader("🗺️ Map Layers")
-    show_current_students = st.sidebar.checkbox(
-        "Show Current Student Locations", 
-        value=False,
-        help="Overlay current CCA student addresses to visualize existing reach"
-    )
-    show_competition_overlay = st.sidebar.checkbox(
-        "Show Other Educational Options", 
-        value=True,
-        help="Display charter, private, and Catholic schools for competitive landscape context"
-    )
-    if not competition_schools.empty:
-        type_options = sorted(competition_schools['type'].dropna().unique())
-    else:
-        type_options = []
-    selected_competition_types = st.sidebar.multiselect(
-        "School Types to Display",
-        options=type_options,
-        default=type_options,
-        help="Select which types of educational institutions to show on the map"
-    ) if type_options else []
+    # Map Layer Controls
+    with st.sidebar.expander("🗺️ **Map Layers**", expanded=False):
+        show_current_students = st.checkbox(
+            "Show Current Student Locations", 
+            value=False,
+            help="Overlay current CCA student addresses"
+        )
+        show_competition_overlay = st.checkbox(
+            "Show Other Educational Options", 
+            value=True,
+            help="Display charter, private, and Catholic schools"
+        )
+        
+        if not competition_schools.empty:
+            type_options = sorted(competition_schools['type'].dropna().unique())
+        else:
+            type_options = []
+        selected_competition_types = st.multiselect(
+            "School Types to Display",
+            options=type_options,
+            default=type_options,
+            help="Select which types of schools to show"
+        ) if type_options else []
 
-    include_competitors_in_edi = st.sidebar.checkbox(
-        "Include Other Schools in EDI Calculation",
-        value=False,
-        help="Adds charter and private school capacity to supply-side when calculating Educational Desert Index"
-    )
-    if include_competitors_in_edi:
-        st.sidebar.info("📊 EDI now includes all school seats in supply calculation")
-    else:
-        st.sidebar.caption("📊 EDI uses CCA/public seats only")
+        include_competitors_in_edi = st.checkbox(
+            "Include Other Schools in EDI Calculation",
+            value=False,
+            help="Adds charter/private capacity to EDI supply"
+        )
+        if include_competitors_in_edi:
+            st.caption("✓ EDI includes all school seats")
+        else:
+            st.caption("EDI uses CCA/public seats only")
+    
+    # Methodology & Help
+    with st.sidebar.expander("ℹ️ **About This Dashboard**"):
+        st.write("""
+        **Purpose:** Identify high-potential growth areas for CCA enrollment.
+        
+        **Key Metrics:**
+        - **HPFI** (High-Potential Family Index): Economic capacity for tuition
+        - **EDI** (Educational Desert Index): Access gaps in Christian education
+        
+        **How to Use:**
+        1. Set geographic scope (default 15km from campuses)
+        2. Apply income filters to target economic segments
+        3. Choose visualization mode (HPFI, EDI, or Overlay)
+        4. Explore Top 10 tables for specific block groups
+        5. Export filtered data for deeper analysis
+        
+        **Data Sources:**
+        - Census ACS 2023 (demographics, income, K-12 enrollment)
+        - NCES school directories (public schools)
+        - Local charter/private school data
+        
+        📧 Questions? Contact your data team.
+        """)
 
     supply_columns = ['lat', 'lon', 'capacity']
 
