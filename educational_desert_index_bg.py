@@ -9,6 +9,25 @@ from sklearn.preprocessing import MinMaxScaler
 
 EARTH_R_KM = 6371.0088
 
+def haversine_km(lat1, lon1, lat2, lon2):
+    """
+    Calculate the great circle distance between two points 
+    on the earth (specified in decimal degrees)
+    Returns distance in kilometers
+    
+    This is the scalar version for individual point-to-point calculations.
+    For vectorized distance matrices, use _haversine_matrix() instead.
+    """
+    # Convert decimal degrees to radians
+    lat1, lon1, lat2, lon2 = map(np.radians, [lat1, lon1, lat2, lon2])
+    
+    # Haversine formula
+    dlat = lat2 - lat1
+    dlon = lon2 - lon1
+    a = np.sin(dlat/2)**2 + np.cos(lat1) * np.cos(lat2) * np.sin(dlon/2)**2
+    c = 2 * np.arcsin(np.sqrt(a))
+    return EARTH_R_KM * c
+
 def _to_rad(x):
     """Convert degrees to radians"""
     return np.deg2rad(x.astype(float))
