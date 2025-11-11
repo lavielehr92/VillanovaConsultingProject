@@ -376,6 +376,24 @@ def compute_marketing_zones(demographics: pd.DataFrame, edi_col: str = "EDI", hp
     return working
 
 
+def ensure_block_group_id(df: pd.DataFrame) -> pd.DataFrame:
+    """Guarantee presence of a string ``block_group_id`` column for stable merges."""
+
+    if df is None or df.empty:
+        return df
+
+    if 'block_group_id' in df.columns:
+        df['block_group_id'] = df['block_group_id'].astype(str)
+        return df
+
+    df = df.copy()
+    if 'GEOID' in df.columns:
+        df['block_group_id'] = df['GEOID'].astype(str)
+    else:
+        df['block_group_id'] = df.index.astype(str)
+    return df
+
+
 # Page config
 st.set_page_config(
     page_title="CCA Growth Opportunity Explorer", 
@@ -614,6 +632,7 @@ def load_block_group_data():
         f"Imputed block groups: {demos_summary['imputed_count']}."
     )
 
+    demographics = ensure_block_group_id(demographics)
     return gdf, demographics, demos_summary
 
 @st.cache_data  
@@ -1467,7 +1486,7 @@ def main():
     )
 
     # Compute global EDI and HPFI before applying additional filters so scores remain comparable
-    demographics = demographics.copy()
+    demographics = ensure_block_group_id(demographics.copy())
 
     if not edi_supply_df.empty:
         with st.spinner("Calculating Educational Desert Index across all block groups..."):
@@ -1511,7 +1530,11 @@ def main():
     demographics['marketing_priority'] = calculate_marketing_priority_bg(demographics, cca_campuses)
 
     metrics_cols = ['block_group_id', 'EDI', 'hpfi', 'nearest_campus_km', 'zone', 'marketing_zone', 'marketing_priority']
-    demographics_filtered = demographics_filtered.drop(columns=[col for col in metrics_cols if col in demographics_filtered.columns], errors='ignore')
+    metric_only_cols = [col for col in metrics_cols if col != 'block_group_id']
+    demographics_filtered = demographics_filtered.drop(columns=[col for col in metric_only_cols if col in demographics_filtered.columns], errors='ignore')
+
+    demographics_filtered = ensure_block_group_id(demographics_filtered)
+
     demographics_filtered = demographics_filtered.merge(
         demographics[metrics_cols],
         on='block_group_id',
