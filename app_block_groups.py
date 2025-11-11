@@ -1010,55 +1010,59 @@ def create_choropleth_map(
     return fig
 
 def calculate_marketing_priority_bg(demographics_df, cca_campuses):
-    """Calculate marketing priority scores for block groups"""
-    
+    """Balanced marketing priority that favors nearby, high-need, high-potential communities."""
+
     marketing_scores = []
-    
+
     for _, bg in demographics_df.iterrows():
         score = 0
-        
-        # Distance to nearest CCA campus (highest weight)
-        distances = []
-        for _, campus in cca_campuses.iterrows():
-            dist = haversine_km(bg['lat'], bg['lon'], campus['lat'], campus['lon'])
-            distances.append(dist)
-        
+
+        # Distance to nearest campus (access & operational feasibility)
+        distances = [
+            haversine_km(bg['lat'], bg['lon'], campus['lat'], campus['lon'])
+            for _, campus in cca_campuses.iterrows()
+            if pd.notna(bg.get('lat')) and pd.notna(bg.get('lon'))
+        ]
         min_distance = min(distances) if distances else 50
-        
-        # Distance scoring (closer is better)
-        if min_distance <= 2:
-            score += 4
-        elif min_distance <= 5:
+        if min_distance <= 5:
             score += 3
         elif min_distance <= 10:
             score += 2
-        elif min_distance <= 20:
+        elif min_distance <= 15:
             score += 1
-        
-        # Income scoring (target range: $50K-$350K)
-        income = bg.get('income', 0)
-        if 100000 <= income <= 350000:
-            score += 3  # Premium tier
-        elif 75000 <= income < 100000:
-            score += 2  # High income
-        elif 50000 <= income < 75000:
-            score += 1  # Upper middle
-        
-        # Christian percentage (mission alignment - now with block-level variation)
-        christian_pct = bg.get('%Christian', 0)
-        if christian_pct >= 43:  # Top quartile (high church density)
-            score += 2  # Strong faith community
-        elif christian_pct >= 37:  # Above county baseline
-            score += 1  # Moderate faith alignment
-        # Below 37% = 0 points (secular/diverse areas)
-        
-        # K-12 population (market size)
+
+        # High-Potential Family Index (economic capacity component)
+        hpfi = bg.get('hpfi', np.nan)
+        if pd.notna(hpfi):
+            if hpfi >= 0.65:
+                score += 2
+            elif hpfi >= 0.5:
+                score += 1
+
+        # Educational Desert Index (higher = greater unmet need)
+        edi = bg.get('EDI', np.nan)
+        if pd.notna(edi):
+            if edi >= 60:
+                score += 3
+            elif edi >= 45:
+                score += 2
+            elif edi >= 30:
+                score += 1
+
+        # Market size (school-age population)
         k12_pop = bg.get('k12_pop', 0)
-        if k12_pop >= 200:
+        if k12_pop >= 250:
+            score += 2
+        elif k12_pop >= 125:
             score += 1
-        
+
+        # Faith alignment as optional tie-breaker
+        christian_pct = bg.get('%Christian', np.nan)
+        if pd.notna(christian_pct) and christian_pct >= 40:
+            score += 1
+
         marketing_scores.append(score)
-    
+
     return marketing_scores
 
 # Main app
@@ -1461,6 +1465,58 @@ def main():
     print(
         f"[EDI] Supply rows: {len(edi_supply_df)} | Competitor supply included: {include_competitors_in_edi and not competitor_supply.empty}"
     )
+
+    # Compute global EDI and HPFI before applying additional filters so scores remain comparable
+    demographics = demographics.copy()
+
+    if not edi_supply_df.empty:
+        with st.spinner("Calculating Educational Desert Index across all block groups..."):
+            demographics_for_edi = demographics[demographics['total_pop'] > 0].copy()
+            if not demographics_for_edi.empty:
+                edi_full_df = compute_edi_block_groups(demographics_for_edi, edi_supply_df)
+                demographics = demographics.drop(columns=['EDI'], errors='ignore')
+                demographics = demographics.merge(
+                    edi_full_df[['block_group_id', 'EDI']],
+                    on='block_group_id',
+                    how='left'
+                )
+                demographics['EDI'] = demographics['EDI'].fillna(0.0)
+            else:
+                demographics['EDI'] = 0.0
+    else:
+        demographics = demographics.drop(columns=['EDI'], errors='ignore')
+        demographics['EDI'] = 0.0
+
+    demographics = demographics.drop(columns=['hpfi', 'nearest_campus_km'], errors='ignore')
+    demographics = compute_hpfi_scores(demographics, edi_col="EDI")
+    hpfi_global_75 = float(demographics['hpfi'].quantile(0.75)) if not demographics['hpfi'].empty else 0.75
+
+    edi_zone_df = compute_edi_hpfi_zones(demographics, edi_col="EDI", hpfi_col="hpfi")
+    demographics['zone'] = edi_zone_df['zone']
+    global_edi_75 = float(edi_zone_df['_edi_75_threshold'].iloc[0]) if not edi_zone_df.empty else 0.0
+
+    marketing_zone_df = compute_marketing_zones(demographics, edi_col="EDI", hpfi_col="hpfi")
+    demographics['marketing_zone'] = marketing_zone_df['marketing_zone']
+    if not marketing_zone_df.empty:
+        marketing_edi_25 = float(marketing_zone_df['_edi_25_threshold'].iloc[0])
+        marketing_edi_75 = float(marketing_zone_df['_edi_75_threshold'].iloc[0])
+        marketing_hpfi_50 = float(marketing_zone_df['_hpfi_50_threshold'].iloc[0])
+        marketing_hpfi_75 = float(marketing_zone_df['_hpfi_75_threshold'].iloc[0])
+        marketing_k12_median = float(marketing_zone_df['_k12_median'].iloc[0])
+    else:
+        marketing_edi_25 = marketing_edi_75 = 0.0
+        marketing_hpfi_50 = marketing_hpfi_75 = 0.0
+        marketing_k12_median = 0.0
+
+    demographics['marketing_priority'] = calculate_marketing_priority_bg(demographics, cca_campuses)
+
+    metrics_cols = ['block_group_id', 'EDI', 'hpfi', 'nearest_campus_km', 'zone', 'marketing_zone', 'marketing_priority']
+    demographics_filtered = demographics_filtered.drop(columns=[col for col in metrics_cols if col in demographics_filtered.columns], errors='ignore')
+    demographics_filtered = demographics_filtered.merge(
+        demographics[metrics_cols],
+        on='block_group_id',
+        how='left'
+    )
     
     # Visualization selection
     color_options = {
@@ -1494,72 +1550,79 @@ def main():
             index=0
         )
     
-    # Calculate EDI if needed
+    # Ensure key metrics are available in the filtered view without recomputing on the subset
     if not demographics_filtered.empty:
-        if not edi_supply_df.empty:
-            with st.spinner("Calculating Educational Desert Index..."):
-                try:
-                    demographics_with_pop = demographics_filtered[demographics_filtered['total_pop'] > 0].copy()
-
-                    if len(demographics_with_pop) > 0:
-                        edi_df = compute_edi_block_groups(demographics_with_pop, edi_supply_df)
-                        demographics_filtered = demographics_filtered.merge(
-                            edi_df[['block_group_id', 'EDI']],
-                            on='block_group_id',
-                            how='left'
-                        )
-                        demographics_filtered = demographics_filtered.copy()
-                        demographics_filtered['EDI'] = demographics_filtered['EDI'].fillna(0.0)
-                    else:
-                        demographics_filtered = demographics_filtered.copy()
-                        demographics_filtered['EDI'] = 0.0
-                except Exception as e:
-                    st.sidebar.warning(f"⚠️ EDI calculation issue: {str(e)[:100]}")
-                    demographics_filtered = demographics_filtered.copy()
-                    def simple_edi(row):
-                        if row.get('total_pop', 0) == 0:
-                            return 0.0
-                        min_dist = min([
-                            haversine_km(row['lat'], row['lon'], c['lat'], c['lon'])
-                            for _, c in cca_campuses.iterrows()
-                        ])
-                        return min(100, min_dist * 5)
-                    demographics_filtered['EDI'] = demographics_filtered.apply(simple_edi, axis=1)
-        else:
-            st.sidebar.info("No school supply data available; using a distance-based EDI estimate.")
-            demographics_filtered = demographics_filtered.copy()
-            def simple_edi(row):
-                if row.get('total_pop', 0) == 0:
-                    return 0.0
-                min_dist = min([
-                    haversine_km(row['lat'], row['lon'], c['lat'], c['lon'])
-                    for _, c in cca_campuses.iterrows()
-                ])
-                return min(100, min_dist * 5)
-            demographics_filtered['EDI'] = demographics_filtered.apply(simple_edi, axis=1)
-
         demographics_filtered = demographics_filtered.copy()
-        demographics_filtered['marketing_priority'] = calculate_marketing_priority_bg(demographics_filtered, cca_campuses)
+
+        def distance_based_edi(row: pd.Series) -> float:
+            if row.get('total_pop', 0) == 0:
+                return 0.0
+            if cca_campuses.empty:
+                return 0.0
+            distances = [
+                haversine_km(row['lat'], row['lon'], c['lat'], c['lon'])
+                for _, c in cca_campuses.iterrows()
+                if pd.notna(row.get('lat')) and pd.notna(row.get('lon'))
+            ]
+            min_dist = min(distances) if distances else 50.0
+            return min(100.0, min_dist * 5.0)
+
+        if 'EDI' not in demographics_filtered.columns:
+            if not edi_supply_df.empty:
+                with st.spinner("Calculating Educational Desert Index..."):
+                    try:
+                        demographics_with_pop = demographics_filtered[demographics_filtered['total_pop'] > 0].copy()
+                        if not demographics_with_pop.empty:
+                            edi_df = compute_edi_block_groups(demographics_with_pop, edi_supply_df)
+                            demographics_filtered = demographics_filtered.merge(
+                                edi_df[['block_group_id', 'EDI']],
+                                on='block_group_id',
+                                how='left'
+                            )
+                        else:
+                            demographics_filtered['EDI'] = 0.0
+                    except Exception as exc:
+                        st.sidebar.warning(f"⚠️ EDI calculation issue: {str(exc)[:100]}")
+                        demographics_filtered['EDI'] = demographics_filtered.apply(distance_based_edi, axis=1)
+            else:
+                st.sidebar.info("No school supply data available; using a distance-based EDI estimate.")
+                demographics_filtered['EDI'] = demographics_filtered.apply(distance_based_edi, axis=1)
+        else:
+            demographics_filtered['EDI'] = pd.to_numeric(demographics_filtered['EDI'], errors='coerce').fillna(0.0)
+
+        if 'hpfi' not in demographics_filtered.columns or demographics_filtered['hpfi'].isna().all():
+            demographics_filtered = compute_hpfi_scores(
+                demographics_filtered,
+                edi_col="EDI" if 'EDI' in demographics_filtered.columns else 'edi'
+            )
+
+        if 'marketing_priority' not in demographics_filtered.columns:
+            demographics_filtered['marketing_priority'] = calculate_marketing_priority_bg(demographics_filtered, cca_campuses)
+
+        if 'zone' not in demographics_filtered.columns and not edi_zone_df.empty:
+            demographics_filtered = demographics_filtered.merge(
+                edi_zone_df[['block_group_id', 'zone']],
+                on='block_group_id',
+                how='left'
+            )
+
+        if 'marketing_zone' not in demographics_filtered.columns and not marketing_zone_df.empty:
+            demographics_filtered = demographics_filtered.merge(
+                marketing_zone_df[['block_group_id', 'marketing_zone']],
+                on='block_group_id',
+                how='left'
+            )
 
     if 'first_gen_pct' not in demographics_filtered.columns and '%first_gen' in demographics_filtered.columns:
         demographics_filtered['first_gen_pct'] = pd.to_numeric(demographics_filtered['%first_gen'], errors='coerce')
     else:
         demographics_filtered['first_gen_pct'] = pd.to_numeric(demographics_filtered.get('first_gen_pct'), errors='coerce')
-
-    demographics_filtered = compute_hpfi_scores(demographics_filtered, edi_col="EDI" if 'EDI' in demographics_filtered.columns else 'edi')
-
-    # Compute zones if overlay mode or marketing zones mode is selected
-    if selected_map_mode == 'Overlay: EDI × HPFI':
-        demographics_filtered = compute_edi_hpfi_zones(demographics_filtered, edi_col="EDI", hpfi_col="hpfi")
-    elif selected_map_mode == 'High-Potential Marketing Zones':
-        demographics_filtered = compute_marketing_zones(demographics_filtered, edi_col="EDI", hpfi_col="hpfi")
     
 
     hpfi_threshold = None
     if highlight_hpfi and not demographics_filtered.empty:
-        hpfi_series = demographics_filtered['hpfi'].dropna()
-        if not hpfi_series.empty:
-            hpfi_threshold = hpfi_series.quantile(0.75)
+        if 'hpfi' in demographics_filtered.columns:
+            hpfi_threshold = hpfi_global_75 if 'hpfi_global_75' in locals() else demographics_filtered['hpfi'].quantile(0.75)
             demographics_filtered = demographics_filtered[demographics_filtered['hpfi'] >= hpfi_threshold]
         else:
             st.sidebar.warning("HPFI highlight enabled, but no calculable HPFI values were found.")
@@ -1608,12 +1671,12 @@ def main():
         with col4:
             # Show HPFI high-potential count instead of old marketing_priority
             if 'hpfi' in demographics_filtered.columns:
-                hpfi_75th = demographics_filtered['hpfi'].quantile(0.75)
-                high_hpfi_count = len(demographics_filtered[demographics_filtered['hpfi'] >= hpfi_75th])
+                hpfi_cutoff = hpfi_global_75 if 'hpfi_global_75' in locals() else demographics_filtered['hpfi'].quantile(0.75)
+                high_hpfi_count = int((demographics_filtered['hpfi'] >= hpfi_cutoff).sum())
                 st.metric(
                     "High-Potential Areas", 
                     high_hpfi_count,
-                    help=f"Block groups with HPFI ≥ {hpfi_75th:.2f} (top 25% tuition-paying potential)"
+                    help=f"Block groups with HPFI ≥ {hpfi_cutoff:.2f} (citywide top quartile for tuition-paying potential)"
                 )
             else:
                 st.metric(
@@ -1628,12 +1691,13 @@ def main():
             st.caption("HPFI measures tuition-paying capacity: Income (45%), Economic Stability (18%), Campus Proximity (13%), Mission Alignment/Christian % (12%), K-12 Market (9%), Low Competition (3%)")
             hpfi_cols = st.columns(3)
             hpfi_avg = demographics_filtered['hpfi'].mean()
-            hpfi_top = (demographics_filtered['hpfi'] >= 0.75).sum()
+            hpfi_cutoff = hpfi_global_75 if 'hpfi_global_75' in locals() else 0.75
+            hpfi_top = int((demographics_filtered['hpfi'] >= hpfi_cutoff).sum())
             hpfi_max = demographics_filtered['hpfi'].max()
             with hpfi_cols[0]:
                 st.metric("Average HPFI", f"{hpfi_avg:.2f}", help="Mean tuition-paying potential across filtered areas (0.00 = lowest, 1.00 = highest)")
             with hpfi_cols[1]:
-                st.metric("Top-Tier Areas (≥0.75)", int(hpfi_top), help="Block groups in top 25% for economic capacity and growth potential")
+                st.metric("Top-Tier Areas (≥ citywide 75th)", hpfi_top, help=f"Block groups with HPFI ≥ {hpfi_cutoff:.2f} (citywide 75th percentile)")
             with hpfi_cols[2]:
                 st.metric("Peak HPFI", f"{hpfi_max:.2f}", help="Highest HPFI score in current selection")
         
@@ -1672,7 +1736,7 @@ def main():
         
         if is_overlay_mode or is_marketing_zones or (selected_metric in color_options and color_options[selected_metric] in demographics_filtered.columns):
             if hpfi_threshold is not None:
-                st.info(f"💡 HPFI Focus Mode: Showing block groups with HPFI ≥ {hpfi_threshold:.2f} (top 25% tuition-paying potential).")
+                st.info(f"💡 HPFI Focus Mode: Showing block groups with HPFI ≥ {hpfi_threshold:.2f} (citywide top quartile for tuition-paying potential).")
             
             # Show zone counts for overlay mode
             if is_overlay_mode and 'zone' in demographics_filtered.columns:
@@ -1680,16 +1744,32 @@ def main():
                 col1, col2, col3, col4 = st.columns(4)
                 with col1:
                     golden_count = zone_counts.get('Golden Zone', 0)
-                    st.metric('Golden Zone', golden_count, help='High EDI & High HPFI - Priority areas combining access need and economic potential')
+                    st.metric(
+                        'Golden Zone',
+                        golden_count,
+                        help=f"EDI ≥ {global_edi_75:.1f} and HPFI ≥ {hpfi_global_75:.2f} (citywide 75th percentiles)"
+                    )
                 with col2:
                     mission_count = zone_counts.get('Mission Zone', 0)
-                    st.metric('Mission Zone', mission_count, help='High EDI & Low HPFI - Mission-focused outreach areas')
+                    st.metric(
+                        'Mission Zone',
+                        mission_count,
+                        help=f"EDI ≥ {global_edi_75:.1f} and HPFI < {hpfi_global_75:.2f}"
+                    )
                 with col3:
                     affluent_count = zone_counts.get('Affluent Opportunity Zone', 0)
-                    st.metric('Affluent Opportunity', affluent_count, help='Low EDI & High HPFI - Well-served areas with economic capacity')
+                    st.metric(
+                        'Affluent Opportunity',
+                        affluent_count,
+                        help=f"EDI < {global_edi_75:.1f} and HPFI ≥ {hpfi_global_75:.2f}"
+                    )
                 with col4:
                     low_priority_count = zone_counts.get('Low Priority Zone', 0)
-                    st.metric('Low Priority Zone', low_priority_count, help='Low EDI & Low HPFI')
+                    st.metric(
+                        'Low Priority Zone',
+                        low_priority_count,
+                        help=f"EDI < {global_edi_75:.1f} and HPFI < {hpfi_global_75:.2f}"
+                    )
             
             # Show marketing zone counts
             if is_marketing_zones and 'marketing_zone' in demographics_filtered.columns:
@@ -1699,16 +1779,35 @@ def main():
                 col1, col2, col3, col4 = st.columns(4)
                 with col1:
                     premium_count = zone_counts.get('Premium Growth Target', 0)
-                    st.metric('🌟 Premium Growth', premium_count, help='High HPFI + Moderate EDI + Strong K12 - Top priority for outreach')
+                    st.metric(
+                        '🌟 Premium Growth',
+                        premium_count,
+                        help=(
+                            f"HPFI ≥ {marketing_hpfi_75:.2f}, EDI between {marketing_edi_25:.1f}–{marketing_edi_75:.1f}, "
+                            f"K-12 ≥ {marketing_k12_median:,.0f} students"
+                        )
+                    )
                 with col2:
                     established_count = zone_counts.get('Established Market', 0)
-                    st.metric('💼 Established Market', established_count, help='High HPFI + Low EDI - Affluent, well-served areas')
+                    st.metric(
+                        '💼 Established Market',
+                        established_count,
+                        help=f"HPFI ≥ {marketing_hpfi_75:.2f}, EDI < {marketing_edi_25:.1f}"
+                    )
                 with col3:
                     emerging_count = zone_counts.get('Emerging Opportunity', 0)
-                    st.metric('📈 Emerging Opportunity', emerging_count, help='Medium HPFI + Moderate EDI - Growth potential')
+                    st.metric(
+                        '📈 Emerging Opportunity',
+                        emerging_count,
+                        help=f"HPFI between {marketing_hpfi_50:.2f}–{marketing_hpfi_75:.2f}, EDI between {marketing_edi_25:.1f}–{marketing_edi_75:.1f}"
+                    )
                 with col4:
                     foundation_count = zone_counts.get('Foundation Building', 0)
-                    st.metric('🏗️ Foundation Building', foundation_count, help='Longer-term relationship development areas')
+                    st.metric(
+                        '🏗️ Foundation Building',
+                        foundation_count,
+                        help='Longer-term relationship development areas'
+                    )
             
             visible_competition = competition_schools[
                 competition_schools['type'].isin(selected_competition_types)
