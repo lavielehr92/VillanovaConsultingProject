@@ -2006,7 +2006,7 @@ def main():
         demographics = demographics.drop(columns=['EDI'], errors='ignore')
         demographics['EDI'] = 0.0
 
-    demographics = demographics.drop(columns=['hpfi', 'nearest_campus_km'], errors='ignore')
+    demographics = demographics.drop(columns=['hpfi'], errors='ignore')
     # Compute HPFI only on legitimate rows (presentation mode compliance)
     try:
         hpfi_df = demographics[demographics['is_legit'] == True].copy()
@@ -2050,6 +2050,20 @@ def main():
         demographics.loc[rhi_df.index, 'recruitment_heat_index'] = rhi_df['recruitment_heat_index'].values
     except Exception:
         demographics['recruitment_heat_index'] = np.nan
+
+    # Ensure expected metrics columns exist even if upstream calculations failed
+    demographics = ensure_block_group_id(demographics)
+    metrics_defaults = {
+        'EDI': 0.0,
+        'hpfi': np.nan,
+        'nearest_campus_km': np.nan,
+        'zone': 'Unassigned',
+        'marketing_zone': 'General',
+        'marketing_priority': 0.0,
+    }
+    for col, default in metrics_defaults.items():
+        if col not in demographics.columns:
+            demographics[col] = default
 
     metrics_cols = ['block_group_id', 'EDI', 'hpfi', 'nearest_campus_km', 'zone', 'marketing_zone', 'marketing_priority']
     metric_only_cols = [col for col in metrics_cols if col != 'block_group_id']
