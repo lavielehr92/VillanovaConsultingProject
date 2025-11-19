@@ -2091,12 +2091,12 @@ def main():
         'First-Generation %': 'first_gen_pct'
     }
     
-    map_mode_options = ['HPFI (Tuition Potential)', 'EDI (Access Opportunity)', 'Overlay: EDI × HPFI', 'High-Potential Marketing Zones']
+    map_mode_options = list(color_options.keys()) + ['Overlay: EDI × HPFI', 'High-Potential Marketing Zones']
     selected_map_mode = st.sidebar.selectbox(
         "Map Visualization Mode:",
         map_mode_options,
         index=0,
-        help="Choose focus: tuition-paying potential (HPFI), access gaps (EDI), combined overlay, or custom marketing zones"
+        help="Choose focus: tuition-paying potential (HPFI), access gaps (EDI), recruitment intensity (RHI), socioeconomics, or overlay/marketing zones"
     )
     
     # If overlay mode or marketing zones, use zone colors; otherwise use the classic selection
@@ -2104,16 +2104,8 @@ def main():
         selected_metric = 'Overlay: EDI × HPFI'
     elif selected_map_mode == 'High-Potential Marketing Zones':
         selected_metric = 'High-Potential Marketing Zones'
-    elif selected_map_mode == 'HPFI (Tuition Potential)':
-        selected_metric = 'High-Potential Family Index (HPFI)'
-    elif selected_map_mode == 'EDI (Access Opportunity)':
-        selected_metric = 'Educational Desert Index (EDI)'
     else:
-        selected_metric = st.sidebar.selectbox(
-            "Color Map By:", 
-            list(color_options.keys()),
-            index=0
-        )
+        selected_metric = selected_map_mode
     
     # Ensure key metrics are available in the filtered view without recomputing on the subset
     if not demographics_filtered.empty:
@@ -2445,20 +2437,6 @@ def main():
                 show_hud_layer=st.session_state.get('show_hud_layer', False)
             )
             # Provide map style and optional student heatmap parameters from session state
-            fig = create_choropleth_map(
-                gdf_filtered,
-                demographics_filtered,
-                color_col,
-                f"{selected_metric} across Philadelphia Block Groups",
-                show_current_students,
-                current_students if show_current_students else None,
-                show_competition_overlay,
-                visible_competition,
-                use_zones=use_zones_flag,
-                map_style=st.session_state.get('map_style', 'open-street-map'),
-                show_student_heatmap=st.session_state.get('show_student_heatmap', False),
-                student_heatmap_radius=st.session_state.get('student_heatmap_radius', 15)
-            )
             st.plotly_chart(fig, width='stretch')
         else:
             st.info(f"📊 Data for {selected_metric} is being prepared...")
