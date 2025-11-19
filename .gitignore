@@ -190,3 +190,5 @@ Thumbs.db
 # Allow scripts package to ship with the app
 !scripts/
 !scripts/**
+scripts/**/*.pyc
+scripts/**/__pycache__/
