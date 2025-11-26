@@ -1,2553 +1,1059 @@
-"""
-Philadelphia Educational Desert Explorer - Block Group Version
-CCA Expansion Analysis Dashboard with Choropleth Visualization
-"""
-
 import streamlit as st
 import pandas as pd
 import plotly.graph_objects as go
+import plotly.express as px
+import numpy as np
+import json
+import os
+from sklearn.preprocessing import MinMaxScaler
+
+# --- OPTIONAL IMPORTS ---
 try:
     import geopandas as gpd
 except Exception:
     gpd = None
-import json
-from typing import Dict
-import os
-from pathlib import Path
-import requests
-from typing import Tuple
-from educational_desert_index_bg import compute_edi_block_groups, haversine_km
-from scripts.utils.data_quality import compute_legitimate_flag as compute_legitimate_flag_module
-import numpy as np
-from sklearn.preprocessing import MinMaxScaler
+
 try:
+    from educational_desert_index_bg import haversine_km
+    from scripts.utils.data_quality import compute_legitimate_flag as compute_legitimate_flag_module
     from competition_ingest import load_competition_schools
-except ModuleNotFoundError:
-    def load_competition_schools(*, output_path: str | None = None, **_: object) -> pd.DataFrame:
-        """Fallback loader when competition_ingest isn't available.
-
-        Streamlit Cloud runners only include tracked repo files, so if the optional
-        ingestion utility isn't deployed we fall back to the cached CSV that ships
-        with the app.  Returning an empty frame keeps the map working even when the
-        file is missing.
-        """
-
-        csv_path = output_path or "competition_schools.csv"
-        if os.path.exists(csv_path):
-            try:
-                return pd.read_csv(csv_path)
-            except Exception:
-                pass
-        return pd.DataFrame(columns=[
-            "school_name", "type", "grades", "address", "notable_info",
-            "capacity_hint", "lat", "lon", "capacity"
-        ])
-
-try:
     from school_ingest import load_census_schools
-except ModuleNotFoundError:
-    def load_census_schools(*, output_path: str | None = None, **_: object) -> pd.DataFrame:
-        csv_path = output_path or "census_schools.csv"
-        if os.path.exists(csv_path):
-            try:
-                return pd.read_csv(csv_path)
-            except Exception:
-                pass
-        return pd.DataFrame(columns=["school_name", "type", "lat", "lon", "capacity"])
-try:
-    # Allow optional live refresh import
-    from fetch_block_groups_live import main as fetch_live_block_groups
-except Exception:
-    fetch_live_block_groups = None
-
-STATE_FIPS = "42"  # Pennsylvania
-COUNTY_FIPS = "101"  # Philadelphia County
-ACS_YEAR = "2023"
-ACS_ACS5_ENDPOINT = f"https://api.census.gov/data/{ACS_YEAR}/acs/acs5"
-ACS_SUBJECT_ENDPOINT = f"https://api.census.gov/data/{ACS_YEAR}/acs/acs5/subject"
-
-BG_AGE_FIELDS = {
-    "B01001_004E": "male_5_9",
-    "B01001_005E": "male_10_14",
-    "B01001_006E": "male_15_17",
-    "B01001_028E": "female_5_9",
-    "B01001_029E": "female_10_14",
-    "B01001_030E": "female_15_17",
-}
-
-TRACT_ENROLLMENT_FIELDS = {
-    # per ACS S1401 documentation: kindergarten, grades 1-8, grades 9-12 enrollment counts
-    "S1401_C01_004E": "kindergarten_total",
-    "S1401_C01_005E": "grades_1_to_8_total",
-    "S1401_C01_006E": "grades_9_to_12_total",
-}
-
-DATA_CACHE_DIR = Path("data/cache")
-DATA_CACHE_DIR.mkdir(parents=True, exist_ok=True)
-
-# Paths for optional external layers (CSV files stored locally)
-EXTERNAL_DATA_DIR = Path("data/external")
-EXTERNAL_DATA_DIR.mkdir(parents=True, exist_ok=True)
-LAYER_PATHS = {
-    'vacancy': EXTERNAL_DATA_DIR / 'vacancy_block_groups.csv',
-    'crime': EXTERNAL_DATA_DIR / 'crime_per_block_group.csv',
-    'food': EXTERNAL_DATA_DIR / 'food_access_block_groups.csv',
-    'transit': EXTERNAL_DATA_DIR / 'transit_access_block_groups.csv',
-    'gini': EXTERNAL_DATA_DIR / 'gini_block_groups.csv',
-    'hud': EXTERNAL_DATA_DIR / 'hud_assisted_block_groups.csv',
-}
-
-# Default weight profile for interactive sliders
-WEIGHT_DEFAULTS: Dict[str, float] = {
-    'hpfi_income': 0.45,
-    'hpfi_inverse_poverty': 0.18,
-    'hpfi_proximity': 0.13,
-    'hpfi_christian': 0.12,
-    'hpfi_k12': 0.09,
-    'hpfi_inverse_edi': 0.03,
-    'edi_access': 0.40,
-    'edi_ratio': 0.30,
-    'edi_need': 0.20,
-    'edi_infra': 0.10,
-    'rhi_premium': 0.35,
-    'rhi_transit': 0.15,
-    'rhi_crime': 0.15,
-    'rhi_vacancy': 0.10,
-    'rhi_gini': 0.10,
-    'rhi_student_proximity': 0.10,
-    'rhi_faith': 0.05,
-}
-
-# Helper function to get Census API key from multiple sources
-def get_census_api_key():
-    """Try to get Census API key from Streamlit secrets, env vars, or .env file"""
-    # Try Streamlit secrets first (for cloud deployment)
-    try:
-        if hasattr(st, 'secrets') and 'CENSUS_API_KEY' in st.secrets:
-            return st.secrets['CENSUS_API_KEY']
-    except Exception:
-        pass
+except ImportError:
+    def haversine_km(lat1, lon1, lat2, lon2):
+        R = 6371
+        dlat, dlon = np.radians(lat2 - lat1), np.radians(lon2 - lon1)
+        a = np.sin(dlat/2)**2 + np.cos(np.radians(lat1)) * np.cos(np.radians(lat2)) * np.sin(dlon/2)**2
+        return R * 2 * np.arctan2(np.sqrt(a), np.sqrt(1 - a))
     
-    # Try environment variables
-    for name in ["CENSUS_API_KEY", "CensusBureauAPI_KEY", "CENSUSBUREAUAPI_KEY"]:
-        key = os.getenv(name)
-        if key:
-            return key
-    
-    # Try .env file
-    try:
-        from dotenv import load_dotenv
-        load_dotenv()
-        load_dotenv(dotenv_path="MyKeys/.env")
-        for name in ["CENSUS_API_KEY", "CensusBureauAPI_KEY"]:
-            key = os.getenv(name)
-            if key:
-                return key
-    except:
-        pass
-    
-    return None
-
-
-def _acs_request(url: str, params: dict) -> list:
-    api_key = get_census_api_key()
-    if api_key:
-        params = {**params, "key": api_key}
-    response = requests.get(url, params=params, timeout=60)
-    response.raise_for_status()
-    return response.json()
-
-
-@st.cache_data(ttl=86400)
-def fetch_block_group_age_data() -> Tuple[pd.DataFrame, dict]:
-    """Retrieve ACS block-group counts for population age 5-17."""
-
-    params = {
-        "get": ",".join(list(BG_AGE_FIELDS.keys()) + ["NAME"]),
-        "for": "block group:*",
-        "in": f"state:{STATE_FIPS}+county:{COUNTY_FIPS}+tract:*",
-    }
-    payload = _acs_request(ACS_ACS5_ENDPOINT, params)
-    headers = payload[0]
-    expected = list(BG_AGE_FIELDS.keys()) + ["NAME", "state", "county", "tract", "block group"]
-    missing = [col for col in expected if col not in headers]
-    if missing:
-        raise ValueError(f"Missing required ACS variables for block group ages: {', '.join(missing)}")
-
-    df = pd.DataFrame(payload[1:], columns=headers)
-    df["block_group_id"] = df["state"] + df["county"] + df["tract"] + df["block group"]
-    df["tract_id"] = df["state"] + df["county"] + df["tract"]
-
-    for code, alias in BG_AGE_FIELDS.items():
-        df[alias] = pd.to_numeric(df[code], errors="coerce")
-
-    df["bg_age_5_17"] = df[list(BG_AGE_FIELDS.values())].fillna(0).sum(axis=1)
-    df["is_modeled"] = True
-
-    timestamp = pd.Timestamp.utcnow().isoformat()
-    cache_path = DATA_CACHE_DIR / f"bg_age_{ACS_YEAR}.csv"
-    df.to_csv(cache_path, index=False)
-
-    summary = {
-        "timestamp": timestamp,
-        "records": len(df),
-    }
-    cols_to_return = ["block_group_id", "tract_id", "bg_age_5_17", "is_modeled"]
-    return df[cols_to_return], summary
-
-
-@st.cache_data(ttl=86400)
-def fetch_tract_enrollment_data() -> Tuple[pd.DataFrame, dict]:
-    """Retrieve ACS tract-level enrollment totals and compute K-12 rates."""
-
-    # Enrollment counts from S1401 (kindergarten, grades 1-8, grades 9-12)
-    enrollment_params = {
-        "get": ",".join(list(TRACT_ENROLLMENT_FIELDS.keys()) + ["NAME"]),
-        "for": "tract:*",
-        "in": f"state:{STATE_FIPS}+county:{COUNTY_FIPS}",
-    }
-    enrollment_payload = _acs_request(ACS_SUBJECT_ENDPOINT, enrollment_params)
-    enrollment_headers = enrollment_payload[0]
-    expected_enrollment = list(TRACT_ENROLLMENT_FIELDS.keys()) + ["NAME", "state", "county", "tract"]
-    missing_enrollment = [col for col in expected_enrollment if col not in enrollment_headers]
-    if missing_enrollment:
-        raise ValueError(
-            "Missing S1401 enrollment variables: " + ", ".join(missing_enrollment)
-        )
-
-    enrollment_df = pd.DataFrame(enrollment_payload[1:], columns=enrollment_headers)
-    enrollment_df["tract_id"] = enrollment_df["state"] + enrollment_df["county"] + enrollment_df["tract"]
-
-    for code, alias in TRACT_ENROLLMENT_FIELDS.items():
-        enrollment_df[alias] = pd.to_numeric(enrollment_df[code], errors="coerce")
-
-    enrollment_df["tract_enrolled_k12"] = (
-        enrollment_df["kindergarten_total"].fillna(0)
-        + enrollment_df["grades_1_to_8_total"].fillna(0)
-        + enrollment_df["grades_9_to_12_total"].fillna(0)
-    )
-
-    # Tract population age 5-17 from B01001
-    tract_params = {
-        "get": ",".join(list(BG_AGE_FIELDS.keys()) + ["NAME"]),
-        "for": "tract:*",
-        "in": f"state:{STATE_FIPS}+county:{COUNTY_FIPS}",
-    }
-    tract_payload = _acs_request(ACS_ACS5_ENDPOINT, tract_params)
-    tract_headers = tract_payload[0]
-    expected_tract = list(BG_AGE_FIELDS.keys()) + ["NAME", "state", "county", "tract"]
-    missing_tract = [col for col in expected_tract if col not in tract_headers]
-    if missing_tract:
-        raise ValueError(f"Missing tract B01001 variables: {', '.join(missing_tract)}")
-
-    tract_df = pd.DataFrame(tract_payload[1:], columns=tract_headers)
-    tract_df["tract_id"] = tract_df["state"] + tract_df["county"] + tract_df["tract"]
-    for code, alias in BG_AGE_FIELDS.items():
-        tract_df[alias] = pd.to_numeric(tract_df[code], errors="coerce")
-    tract_df["tract_pop_5_17"] = tract_df[list(BG_AGE_FIELDS.values())].fillna(0).sum(axis=1)
-
-    combined = enrollment_df.merge(tract_df[["tract_id", "tract_pop_5_17"]], on="tract_id", how="left")
-    combined["tract_pop_5_17"] = combined["tract_pop_5_17"].fillna(0)
-    combined["tract_rate_k12"] = combined.apply(
-        lambda row: 0.0 if row["tract_pop_5_17"] <= 0 else row["tract_enrolled_k12"] / row["tract_pop_5_17"],
-        axis=1
-    )
-
-    timestamp = pd.Timestamp.utcnow().isoformat()
-    cache_path = DATA_CACHE_DIR / f"tract_enrollment_{ACS_YEAR}.csv"
-    combined.to_csv(cache_path, index=False)
-
-    summary = {
-        "timestamp": timestamp,
-        "records": len(combined),
-    }
-
-    cols = [
-        "tract_id",
-        "tract_enrolled_k12",
-        "tract_pop_5_17",
-        "tract_rate_k12",
-    ]
-    return combined[cols], summary
-
-
-def validate_k12_total(demographics: pd.DataFrame, tract_enrollment_data: pd.DataFrame) -> dict:
-    """
-    Validate K-12 total against expected range (150k-260k).
-    Return validation result with informational notices if out of range.
-    """
-    total = float(demographics['k12_pop'].sum())
-    min_expected = 150000.0  # Adjusted from 200k to 150k based on ACS 2023 enrollment data
-    max_expected = 260000.0
-    
-    result = {
-        'total': total,
-        'is_valid': min_expected <= total <= max_expected,
-        'min_expected': min_expected,
-        'max_expected': max_expected,
-        'notices': []
-    }
-    
-    if total < min_expected:
-        result['notices'].append(
-            f"ℹ️ K-12 total ({total:,.0f}) is below expected minimum ({min_expected:,.0f}). This reflects enrollment vs. population age 5-17."
-        )
-        # Show top 5 tracts by lowest rate
-        tract_enrollment_data_sorted = tract_enrollment_data.sort_values('tract_rate_k12').head(5)
-        result['low_tracts'] = tract_enrollment_data_sorted[['tract_id', 'tract_rate_k12', 'tract_enrolled_k12', 'tract_pop_5_17']].copy()
-    
-    elif total > max_expected:
-        result['notices'].append(
-            f"ℹ️ K-12 total ({total:,.0f}) exceeds expected maximum ({max_expected:,.0f})."
-        )
-        # Show top 5 tracts by highest rate
-        tract_enrollment_data_sorted = tract_enrollment_data.sort_values('tract_rate_k12', ascending=False).head(5)
-        result['high_tracts'] = tract_enrollment_data_sorted[['tract_id', 'tract_rate_k12', 'tract_enrolled_k12', 'tract_pop_5_17']].copy()
-    
-    else:
-        result['messages'] = [f"✅ K-12 total ({total:,.0f}) is within expected range ({min_expected:,.0f}–{max_expected:,.0f})."]
-    
-    return result
-
-
-@st.cache_data(ttl=86400)
-def load_external_layer(name: str) -> pd.DataFrame:
-    """Load optional external layer CSV into a DataFrame (if available).
-
-    Expected column: block_group_id plus a numeric metric column per layer (e.g., vacant_pct, crimes_per_1k, transit_score, food_access_score, gini_index).
-    """
-    path = LAYER_PATHS.get(name)
-    if path is None or not path.exists():
-        return pd.DataFrame()
-    try:
-        df = pd.read_csv(path)
-        df['block_group_id'] = df['block_group_id'].astype(str)
+    def compute_legitimate_flag_module(df):
+        df['is_legit'] = True
         return df
-    except Exception:
-        return pd.DataFrame()
+        
+    def load_competition_schools(**kwargs): return pd.DataFrame()
+    def load_census_schools(**kwargs): return pd.DataFrame()
 
+# --- CONFIG ---
+st.set_page_config(page_title="CCA Growth Explorer", layout="wide", initial_sidebar_state="expanded")
 
-def normalise_series(series: pd.Series) -> pd.Series:
-    """Normalize numeric series to [0,1] using min-max scaling; handle constant series by returning 0.5."""
-    ser = pd.to_numeric(series, errors='coerce')
-    if ser.dropna().empty:
-        return pd.Series(0.0, index=ser.index)
-    minv, maxv = ser.min(), ser.max()
-    if pd.isna(minv) or pd.isna(maxv) or minv == maxv:
-        # No spread - use median-level
-        return pd.Series(0.5, index=ser.index)
-    return ((ser - minv) / (maxv - minv)).clip(0, 1).fillna(0.0)
+CCA_CAMPUSES = pd.DataFrame({
+    'name': ['CCA Main Campus (58th St)', 'CCA Baltimore Ave Campus'],
+    'lat': [39.9386, 39.9508],
+    'lon': [-75.2312, -75.2085],
+    'address': ['1939 S. 58th St', '4109 Baltimore Ave']
+})
 
+# --- SEPTA TRANSIT DATA ---
+# Market-Frankford Line stations (key stations for CCA access)
+MFL_STATIONS = [
+    {"name": "69th St Terminal", "lat": 39.9630, "lon": -75.2588},
+    {"name": "63rd St", "lat": 39.9621, "lon": -75.2495},
+    {"name": "60th St", "lat": 39.9612, "lon": -75.2415},  # Closest to CCA!
+    {"name": "56th St", "lat": 39.9599, "lon": -75.2329},
+    {"name": "52nd St", "lat": 39.9596, "lon": -75.2231},
+    {"name": "46th St", "lat": 39.9591, "lon": -75.2106},
+    {"name": "40th St", "lat": 39.9581, "lon": -75.1999},
+    {"name": "34th St", "lat": 39.9567, "lon": -75.1872},
+    {"name": "30th St", "lat": 39.9557, "lon": -75.1827},
+    {"name": "15th St", "lat": 39.9523, "lon": -75.1654},
+    {"name": "City Hall", "lat": 39.9523, "lon": -75.1637},
+    {"name": "5th St", "lat": 39.9517, "lon": -75.1500},
+    {"name": "2nd St", "lat": 39.9494, "lon": -75.1410},
+    {"name": "Spring Garden", "lat": 39.9595, "lon": -75.1491},
+    {"name": "Girard", "lat": 39.9681, "lon": -75.1568},
+    {"name": "Berks", "lat": 39.9776, "lon": -75.1431},
+    {"name": "Erie-Torresdale", "lat": 40.0011, "lon": -75.1254},
+    {"name": "Frankford Terminal", "lat": 40.0231, "lon": -75.0809},
+]
 
-def merge_optional_layers(demos: pd.DataFrame) -> pd.DataFrame:
-    """Merge available external layers into demographics and compute normalized scores.
+# Broad Street Line stations (North-South)
+BSL_STATIONS = [
+    {"name": "Fern Rock", "lat": 40.0457, "lon": -75.1256},
+    {"name": "Olney", "lat": 40.0341, "lon": -75.1212},
+    {"name": "Logan", "lat": 40.0217, "lon": -75.1456},
+    {"name": "Erie", "lat": 40.0086, "lon": -75.1562},
+    {"name": "North Phila", "lat": 39.9913, "lon": -75.1561},
+    {"name": "Temple U", "lat": 39.9816, "lon": -75.1498},
+    {"name": "Cecil B Moore", "lat": 39.9789, "lon": -75.1589},
+    {"name": "City Hall", "lat": 39.9523, "lon": -75.1637},
+    {"name": "Walnut-Locust", "lat": 39.9473, "lon": -75.1636},
+    {"name": "Ellsworth", "lat": 39.9383, "lon": -75.1664},
+    {"name": "Tasker-Morris", "lat": 39.9294, "lon": -75.1679},
+    {"name": "Snyder", "lat": 39.9218, "lon": -75.1709},
+    {"name": "Oregon", "lat": 39.9156, "lon": -75.1715},
+    {"name": "AT&T Station (Sports Complex)", "lat": 39.9065, "lon": -75.1720},
+]
 
-    Known new columns:
-    - vacancy_norm (higher => more vacant properties)
-    - crime_norm (higher => safer = 1 - crime per 1k normalized)
-    - transit_norm (higher => better transit access)
-    - food_access_norm (higher => better access to food resources)
-    - gini_norm (higher => more inequality)
-    - hud_presence (1 if HUD-assisted housing present else 0)
-    """
-    df = demos.copy()
-    # Vacancy
-    vac = load_external_layer('vacancy')
-    if not vac.empty:
-        df = df.merge(vac[['block_group_id', 'vacant_pct']], on='block_group_id', how='left')
-    else:
-        df['vacant_pct'] = df.get('vacant_pct', 0)
-    df['vacancy_norm'] = normalise_series(df['vacant_pct'])
-    # Crime
-    crime = load_external_layer('crime')
-    if not crime.empty:
-        df = df.merge(crime[['block_group_id', 'crimes_per_1k']], on='block_group_id', how='left')
-    else:
-        df['crimes_per_1k'] = df.get('crimes_per_1k', 0)
-    # Higher `crimes_per_1k` -> worse; we invert it to safety score
-    df['crime_norm'] = 1.0 - normalise_series(df['crimes_per_1k'])
-    # Transit
-    transit = load_external_layer('transit')
-    if not transit.empty:
-        df = df.merge(transit[['block_group_id', 'transit_access_score']], on='block_group_id', how='left')
-    else:
-        df['transit_access_score'] = df.get('transit_access_score', 0)
-    df['transit_norm'] = normalise_series(df['transit_access_score'])
-    # Food access
-    food = load_external_layer('food')
-    if not food.empty:
-        df = df.merge(food[['block_group_id', 'food_access_score']], on='block_group_id', how='left')
-    else:
-        df['food_access_score'] = df.get('food_access_score', 0)
-    df['food_access_norm'] = normalise_series(df['food_access_score'])
-    # Gini index
-    gini = load_external_layer('gini')
-    if not gini.empty:
-        df = df.merge(gini[['block_group_id', 'gini_index']], on='block_group_id', how='left')
-    else:
-        df['gini_index'] = df.get('gini_index', 0)
-    df['gini_norm'] = normalise_series(df['gini_index'])
-    # HUD presence
-    hud = load_external_layer('hud')
-    if not hud.empty:
-        df = df.merge(hud[['block_group_id', 'hud_assisted']], on='block_group_id', how='left')
-        df['hud_assisted'] = df['hud_assisted'].fillna(0)
-    else:
-        df['hud_assisted'] = 0
-    df['hud_presence'] = df['hud_assisted'].fillna(0).astype(int)
+# Regional Rail stations with connections to Center City
+REGIONAL_RAIL_STATIONS = [
+    {"name": "30th St Station", "lat": 39.9557, "lon": -75.1827},
+    {"name": "Suburban Station", "lat": 39.9541, "lon": -75.1676},
+    {"name": "Jefferson Station", "lat": 39.9527, "lon": -75.1582},
+    {"name": "Temple U", "lat": 39.9816, "lon": -75.1498},
+    {"name": "North Broad", "lat": 39.9697, "lon": -75.1573},
+    {"name": "Wayne Junction", "lat": 40.0236, "lon": -75.1595},
+    {"name": "Fern Rock", "lat": 40.0457, "lon": -75.1256},
+    {"name": "Cheltenham", "lat": 40.0612, "lon": -75.1456},
+    {"name": "Elkins Park", "lat": 40.0712, "lon": -75.1266},
+    {"name": "Jenkintown-Wyncote", "lat": 40.0956, "lon": -75.1370},
+    {"name": "Glenside", "lat": 40.1045, "lon": -75.1531},
+    {"name": "Ardmore", "lat": 40.0089, "lon": -75.2911},
+    {"name": "Bryn Mawr", "lat": 40.0192, "lon": -75.3063},
+    {"name": "Overbrook", "lat": 39.9873, "lon": -75.2515},
+    {"name": "Merion", "lat": 39.9989, "lon": -75.2631},
+]
 
-    # Faith / Christian normalization
-    if '%Christian' in df.columns:
-        df['faith_norm'] = normalise_series(df['%Christian'])
-    elif 'pct_christian' in df.columns:
-        df['faith_norm'] = normalise_series(df['pct_christian'])
-    else:
-        df['faith_norm'] = 0.0
+# Key bus routes serving CCA area
+# Route 42 (Spruce/Pine) - Direct to CCA
+# Route 34 Trolley - Connects to 60th St
+CCA_BUS_CORRIDORS = [
+    {"name": "Route 42 - Spruce St", "lat_range": (39.935, 39.945), "lon_range": (-75.25, -75.15)},
+]
 
-    return df
-
-
-def compute_edi_hpfi_zones(demographics: pd.DataFrame, edi_col: str = "EDI", hpfi_col: str = "hpfi") -> pd.DataFrame:
-    """
-    Create 4-zone overlay using 75th percentile thresholds for EDI and HPFI.
-    
-    Zones:
-    - Golden Zone: high EDI & high HPFI
-    - Mission Zone: high EDI & low HPFI
-    - Affluent Opportunity Zone: low EDI & high HPFI
-    - Low Priority Zone: low EDI & low HPFI
-    """
-    working = demographics.copy()
-    
-    # Ensure numeric
-    working[edi_col] = pd.to_numeric(working.get(edi_col), errors='coerce').fillna(0)
-    working[hpfi_col] = pd.to_numeric(working.get(hpfi_col), errors='coerce').fillna(0)
-    
-    # Compute quantiles
-    edi_75 = working[edi_col].quantile(0.75)
-    hpfi_75 = working[hpfi_col].quantile(0.75)
-    
-    edi_high = working[edi_col] >= edi_75
-    hpfi_high = working[hpfi_col] >= hpfi_75
-    
-    def classify_zone(edi_h, hpfi_h):
-        if edi_h and hpfi_h:
-            return 'Golden Zone'
-        elif edi_h and not hpfi_h:
-            return 'Mission Zone'
-        elif not edi_h and hpfi_h:
-            return 'Affluent Opportunity Zone'
+# --- DATA LOADING ---
+@st.cache_data(ttl=3600)
+def load_core_data():
+    try:
+        # Try metro-wide data first, fall back to Philadelphia-only
+        if os.path.exists('metro_block_groups.geojson'):
+            gdf = gpd.read_file('metro_block_groups.geojson')
+            demos = pd.read_csv('demographics_metro.csv')
         else:
-            return 'Low Priority Zone'
-    
-    working['zone'] = [classify_zone(e, h) for e, h in zip(edi_high, hpfi_high)]
-    
-    # Store thresholds as metadata
-    working['_edi_75_threshold'] = edi_75
-    working['_hpfi_75_threshold'] = hpfi_75
-    
-    return working
-
-
-def compute_marketing_zones(demographics: pd.DataFrame, edi_col: str = "EDI", hpfi_col: str = "hpfi") -> pd.DataFrame:
-    """
-    Create High-Potential Marketing Zones optimized for growth strategy.
-    
-    Focuses on areas with:
-    - High HPFI (tuition-paying potential) 
-    - Moderate EDI (some access gaps but not extreme deserts)
-    - Strong K-12 population
-    
-    Zones:
-    - Premium Growth: High HPFI (≥75th), Moderate EDI (25-75th), High K12
-    - Established Markets: High HPFI (≥75th), Low EDI (<25th) - affluent, well-served
-    - Emerging Opportunity: Medium HPFI (50-75th), Moderate EDI (25-75th)
-    - Foundation Building: All other combinations
-    """
-    working = demographics.copy()
-    
-    # Ensure numeric
-    working[edi_col] = pd.to_numeric(working.get(edi_col), errors='coerce').fillna(0)
-    working[hpfi_col] = pd.to_numeric(working.get(hpfi_col), errors='coerce').fillna(0)
-    working['k12_pop'] = pd.to_numeric(working.get('k12_pop'), errors='coerce').fillna(0)
-    
-    # Compute quantiles
-    edi_25 = working[edi_col].quantile(0.25)
-    edi_75 = working[edi_col].quantile(0.75)
-    hpfi_50 = working[hpfi_col].quantile(0.50)
-    hpfi_75 = working[hpfi_col].quantile(0.75)
-    k12_median = working['k12_pop'].median()
-    
-    def classify_marketing_zone(row):
-        edi = row[edi_col]
-        hpfi = row[hpfi_col]
-        k12 = row['k12_pop']
+            gdf = gpd.read_file('philadelphia_block_groups.geojson')
+            demos = pd.read_csv('demographics_block_groups.csv')
         
-        # Premium Growth: High HPFI + Moderate EDI + Good K12 population
-        if hpfi >= hpfi_75 and edi_25 <= edi <= edi_75 and k12 >= k12_median:
-            return 'Premium Growth Target'
+        if 'GEOID' in gdf.columns: gdf['GEOID'] = gdf['GEOID'].astype(str)
+        if 'block_group_id' in demos.columns: demos['block_group_id'] = demos['block_group_id'].astype(str)
         
-        # Established Markets: High HPFI + Low EDI (already well-served but affluent)
-        elif hpfi >= hpfi_75 and edi < edi_25:
-            return 'Established Market'
+        cols = ['income', 'poverty_rate', 'total_pop', 'k12_pop', '%Christian']
+        for c in cols:
+            if c in demos.columns:
+                demos[c] = pd.to_numeric(demos[c], errors='coerce')
         
-        # Emerging Opportunity: Medium HPFI + Moderate EDI
-        elif hpfi >= hpfi_50 and edi_25 <= edi <= edi_75:
-            return 'Emerging Opportunity'
-        
-        # Foundation Building: Everything else
-        else:
-            return 'Foundation Building'
-    
-    working['marketing_zone'] = working.apply(classify_marketing_zone, axis=1)
-    
-    # Store thresholds as metadata
-    working['_edi_25_threshold'] = edi_25
-    working['_edi_75_threshold'] = edi_75
-    working['_hpfi_50_threshold'] = hpfi_50
-    working['_hpfi_75_threshold'] = hpfi_75
-    working['_k12_median'] = k12_median
-    
-    return working
-
-
-def ensure_block_group_id(df: pd.DataFrame) -> pd.DataFrame:
-    """Guarantee presence of a string ``block_group_id`` column for stable merges."""
-
-    if df is None or df.empty:
-        return df
-
-    if 'block_group_id' in df.columns:
-        df['block_group_id'] = df['block_group_id'].astype(str)
-        return df
-
-    df = df.copy()
-    if 'GEOID' in df.columns:
-        df['block_group_id'] = df['GEOID'].astype(str)
-    else:
-        df['block_group_id'] = df.index.astype(str)
-    return df
-
-
-# compute_legitimate_flag is provided by the helper module: scripts.utils.data_quality.compute_legitimate_flag
-
-
-# Page config
-st.set_page_config(
-    page_title="CCA Growth Opportunity Explorer", 
-    layout="wide", 
-    initial_sidebar_state="expanded"
-)
-
-# Custom CSS for professional blue/grey theme
-st.markdown("""
-<style>
-    @import url('https://fonts.googleapis.com/css2?family=Roboto:wght@300;400;500;700&display=swap');
-    
-    * {
-        font-family: 'Roboto', sans-serif;
-    }
-    
-    .main > div {
-        padding-top: 2rem;
-        background-color: #F8F9FA;
-    }
-    
-    .stMetric {
-        background-color: #ffffff;
-        border: 2px solid #0070C0;
-        padding: 1rem;
-        border-radius: 8px;
-        box-shadow: 0 2px 4px rgba(0,0,0,0.1);
-    }
-    
-    .stButton > button {
-        background-color: #0070C0;
-        color: white;
-        border-radius: 6px;
-        border: none;
-        padding: 0.5rem 1rem;
-        font-weight: 500;
-        transition: background-color 0.3s;
-    }
-    
-    .stButton > button:hover {
-        background-color: #005A9C;
-    }
-    
-    h1, h2, h3 {
-        color: #4F4F4F;
-    }
-    
-    .stInfo {
-        background-color: #E3F2FD;
-        border-left: 4px solid #0070C0;
-        border-radius: 4px;
-    }
-    
-    .stExpander {
-        border: 1px solid #0070C0;
-        border-radius: 6px;
-    }
-    
-    /* Remove red styling, use blue info boxes */
-    .stAlert {
-        border-radius: 6px;
-    }
-</style>
-""", unsafe_allow_html=True)
-
-
-def compute_hpfi_scores(df: pd.DataFrame, edi_col: str = "EDI", weights: Dict[str, float] | None = None) -> pd.DataFrame:
-    """Attach High-Potential Family Index (0-1) to the provided DataFrame.
-    
-    Tuned to prioritize tuition-paying potential through higher income weighting,
-    inverse poverty signal, and proximity to CCA campuses to support growth strategy.
-    """
-
-    def normalise(series: pd.Series) -> pd.Series:
-        series = pd.to_numeric(series, errors="coerce")
-        if series.nunique(dropna=True) <= 1:
-            return pd.Series(0.5, index=series.index)
-        scaled = MinMaxScaler().fit_transform(series.to_frame()).flatten()
-        return pd.Series(scaled, index=series.index)
-
-    working = df.copy()
-    
-    # CCA Campus locations
-    cca_campuses = pd.DataFrame({
-        'name': ['West Oak Lane', 'Hunting Park'],
-        'lat': [40.056339, 40.015278],
-        'lon': [-75.153858, -75.138889]
-    })
-
-    candidate_names = []
-    if isinstance(edi_col, str):
-        candidate_names.extend([edi_col, edi_col.lower(), edi_col.upper()])
-    candidate_names.extend([col for col in working.columns if isinstance(col, str) and col.lower() == str(edi_col).lower()])
-
-    edi_series = None
-    for name in candidate_names:
-        if isinstance(name, str) and name in working.columns:
-            maybe_series = working[name]
-            edi_series = maybe_series if isinstance(maybe_series, pd.Series) else pd.Series(maybe_series)
-            break
-
-    if edi_series is None:
-        edi_series = pd.Series(np.nan, index=working.index)
-    else:
-        if not isinstance(edi_series, pd.Series):
-            edi_series = pd.Series(edi_series)
-        if len(edi_series.index) != len(working.index):
-            edi_series = edi_series.reset_index(drop=True)
-            edi_series = edi_series.reindex(range(len(working.index)))
-        edi_series.index = working.index
-
-    income_norm = normalise(working.get("income"))
-    k12_norm = normalise(working.get("k12_pop"))
-
-    # Inverse poverty as additional tuition-potential signal
-    poverty_series = pd.to_numeric(working.get("poverty_rate"), errors="coerce").fillna(0)
-    inverse_poverty = 1.0 - (poverty_series / 100.0).clip(lower=0.0, upper=1.0)
-    inverse_poverty_norm = normalise(pd.Series(inverse_poverty, index=working.index))
-
-    edi_values = pd.to_numeric(edi_series, errors="coerce").fillna(0.0)
-    inverse_edi = 1.0 - (edi_values / 100.0).clip(lower=0.0, upper=1.0)
-    
-    # Campus proximity score (closer = higher HPFI)
-    proximity_scores = []
-    for _, row in working.iterrows():
-        if pd.notna(row.get('lat')) and pd.notna(row.get('lon')):
-            min_dist = min([
-                haversine_km(row['lat'], row['lon'], campus['lat'], campus['lon'])
-                for _, campus in cca_campuses.iterrows()
-            ])
-            # Convert to score: 0km=1.0, 20km=0.0, exponential decay
-            proximity_score = np.exp(-min_dist / 8.0)  # 8km half-life
-        else:
-            proximity_score = 0.0
-        proximity_scores.append(proximity_score)
-    
-    proximity_norm = normalise(pd.Series(proximity_scores, index=working.index))
-
-    # Christian % as mission alignment signal (now with block-level variation)
-    christian_series = pd.to_numeric(working.get('%Christian'), errors='coerce').fillna(36.3)
-    # Normalize to 0-1 scale (36.3% min, 47.5% max based on church density)
-    christian_norm = normalise(christian_series)
-
-    # Allow dynamic weights from session state or fallback to defaults
-    if weights is None:
-        weights = {
-            "income": 0.45,           # Primary tuition signal
-            "inverse_poverty": 0.18,  # Economic stability
-            "proximity": 0.13,        # Distance to CCA campuses
-            "christian": 0.12,        # Mission alignment
-            "k12": 0.09,              # Market size
-            "inverse_edi": 0.03,      # Low competition signal
-        }
-
-    hpfi = (
-        weights.get('income', 0.45) * income_norm +
-        weights.get('inverse_poverty', 0.18) * inverse_poverty_norm +
-        weights.get('proximity', 0.13) * proximity_norm +
-        weights.get('christian', 0.12) * christian_norm +
-        weights.get('k12', 0.09) * k12_norm +
-        weights.get('inverse_edi', 0.03) * inverse_edi
-    )
-
-    working["hpfi"] = hpfi.clip(0.0, 1.0)
-    working["nearest_campus_km"] = proximity_scores  # Store for reference
-    return working
-
-@st.cache_data(ttl=3600)  # Cache for 1 hour, then reload
-def load_block_group_data():
-    """Load block group geometries and enrich demographics with modeled ACS enrollment."""
-
-    try:
-        gdf = gpd.read_file('philadelphia_block_groups.geojson')
-        demographics = pd.read_csv('demographics_block_groups.csv')
-    except Exception as exc:
-        st.error(f"Error loading block group data: {exc}")
-        st.info("Please run fetch_block_groups.py first to download Census block group data")
-        st.stop()
-
-    keep_cols = [col for col in ['GEOID', 'geometry'] if col in gdf.columns]
-    gdf = gdf[keep_cols].copy()
-
-    gdf['GEOID'] = gdf['GEOID'].astype(str)
-    demographics['block_group_id'] = demographics['block_group_id'].astype(str)
-
-    sentinel_cols = ['income', 'poverty_rate', 'total_pop', 'pct_black', 'pct_white', 'hh_with_u18', '%Christian']
-    for col in sentinel_cols:
-        if col in demographics.columns:
-            demographics[col] = demographics[col].replace(-666666666, pd.NA)
-            demographics[col] = pd.to_numeric(demographics[col], errors='coerce')
-
-    if 'TRACTCE' in demographics.columns:
-        demographics['TRACTCE'] = demographics['TRACTCE'].astype(str)
-
-    legacy_total = pd.to_numeric(demographics.get('k12_pop'), errors='coerce').sum()
-    if 'k12_pop' in demographics.columns:
-        demographics.rename(columns={'k12_pop': 'k12_pop_legacy'}, inplace=True)
-    else:
-        demographics['k12_pop_legacy'] = pd.NA
-
-    try:
-        bg_age_df, bg_meta = fetch_block_group_age_data()
-        tract_enrollment_df, tract_meta = fetch_tract_enrollment_data()
-    except Exception as exc:
-        raise RuntimeError(
-            "Unable to retrieve ACS 2023 B01001/S1401 data. Provide a valid CENSUS_API_KEY and internet access."
-        ) from exc
-
-    demographics = demographics.merge(bg_age_df, on='block_group_id', how='left')
-    demographics['tract_id'] = demographics['block_group_id'].str.slice(0, 11)
-    demographics = demographics.merge(tract_enrollment_df, on='tract_id', how='left')
-
-    missing_mask = demographics['tract_rate_k12'].isna() | demographics['bg_age_5_17'].isna()
-    demographics['bg_age_5_17'] = demographics['bg_age_5_17'].fillna(0)
-    demographics['tract_rate_k12'] = demographics['tract_rate_k12'].fillna(0)
-    demographics['bg_enrolled_k12'] = (demographics['bg_age_5_17'] * demographics['tract_rate_k12']).clip(lower=0)
-    demographics['k12_pop'] = demographics['bg_enrolled_k12'].round(0)
-    demographics['is_modeled'] = True
-    demographics['k12_imputed'] = False
-
-    if missing_mask.any():
-        demographics.loc[missing_mask, 'k12_pop'] = 0
-        demographics.loc[missing_mask, 'k12_imputed'] = True
-
-    demos_summary = {
-        'block_groups': len(demographics),
-        'k12_total': float(demographics['k12_pop'].sum()),
-        'legacy_k12_total': float(legacy_total) if pd.notna(legacy_total) else None,
-        'imputed_count': int(demographics['k12_imputed'].sum()),
-        'bg_cache_timestamp': bg_meta.get('timestamp'),
-        'tract_cache_timestamp': tract_meta.get('timestamp'),
-    }
-
-    print(
-        f"[QA] Block groups loaded: {demos_summary['block_groups']}. "
-        f"ACS {ACS_YEAR} modeled K-12: {demos_summary['k12_total']:,.0f}. "
-        f"Imputed block groups: {demos_summary['imputed_count']}."
-    )
-
-    # Merge optional external layers (vacancy, crime, transit, food, gini, HUD)
-    try:
-        demographics = merge_optional_layers(demographics)
-    except Exception:
-        # If optional layers are missing or fail, keep going with core dataset
-        demographics = demographics
-
-    demographics = ensure_block_group_id(demographics)
-    # Add 'is_legit' flag for each block group (valid coordinates, population, income, k12)
-    demographics = compute_legitimate_flag_module(demographics)
-    return gdf, demographics, demos_summary
-
-@st.cache_data  
-def load_current_students():
-    """Load current student overlay data (anonymized locations)."""
-    try:
-        return pd.read_csv('current_students_anonymized.csv')
+        return gdf, demos
     except Exception as e:
-        st.error(f"Error loading student overlay data: {e}")
-        return pd.DataFrame()
+        st.error(f"Data Error: {e}")
+        return gpd.GeoDataFrame(), pd.DataFrame()
 
-def create_choropleth_map(
-    gdf_filtered,
-    demographics_filtered,
-    color_column,
-    title,
-    show_students=False,
-    students_df=None,
-    show_competition=False,
-    competition_df=None,
-    use_zones=False,
-    map_style: str = 'open-street-map',
-    show_student_heatmap: bool = False,
-    student_heatmap_radius: int = 15,
-    highlight_premium: bool = False,
-    show_vacancy_layer: bool = False,
-    show_crime_layer: bool = False,
-    show_transit_layer: bool = False,
-    show_food_layer: bool = False,
-    show_hud_layer: bool = False,
-):
-    """Create choropleth map with block group boundaries.
-    
-    Args:
-        use_zones: If True, color by 'zone' column with 4-category scheme.
-    """
-    
-    # Debug output
-    st.sidebar.write(f"🔍 Debug: Creating map with {len(gdf_filtered)} geographic features")
-    st.sidebar.write(f"🔍 Debug: Demographic data has {len(demographics_filtered)} records")
-    
-    # Merge geodata with demographic data
-    plot_data = gdf_filtered.merge(demographics_filtered, left_on='GEOID', right_on='block_group_id', how='left')
-
-    if 'EDI' in plot_data.columns:
-        plot_data['EDI'] = pd.to_numeric(plot_data['EDI'], errors='coerce')
-    if 'hpfi' in plot_data.columns:
-        plot_data['hpfi'] = pd.to_numeric(plot_data['hpfi'], errors='coerce')
-    if 'k12_pop' in plot_data.columns:
-        plot_data['k12_pop'] = pd.to_numeric(plot_data['k12_pop'], errors='coerce')
-    
-    st.sidebar.write(f"🔍 Debug: Merged data has {len(plot_data)} rows")
-    
-    if len(plot_data) == 0:
-        st.error("❌ No data to display on map after filtering!")
-        return go.Figure()
-    
-    # Check if color_column or zone column exists
-    if use_zones == 'marketing':
-        if 'marketing_zone' not in plot_data.columns:
-            st.error("Marketing zone column not found. Cannot create marketing zones map.")
-            return go.Figure()
-        color_column = 'marketing_zone'
-    elif use_zones:
-        if 'zone' not in plot_data.columns:
-            st.error("Zone column not found. Cannot create overlay map.")
-            return go.Figure()
-        color_column = 'zone'
-    elif color_column not in plot_data.columns:
-        st.warning(f"⚠️ Column '{color_column}' not found. Available columns: {list(plot_data.columns)}")
-        # Use a default column
-        if 'k12_pop' in plot_data.columns:
-            color_column = 'k12_pop'
-        else:
-            return go.Figure()
-    
-    # Ensure key id column exists after merge
-    if 'block_group_id' not in plot_data.columns and 'GEOID' in plot_data.columns:
-        plot_data['block_group_id'] = plot_data['GEOID'].astype(str)
-
-    # Prepare GeoJSON
-    geojson_data = json.loads(plot_data.to_json())
-    
-    # Add properties to each feature for hover display
-    for idx, feature in enumerate(geojson_data['features']):
-        if idx < len(plot_data):
-            row = plot_data.iloc[idx]
-            feature['id'] = str(idx)
-            feature['properties']['block_group_id'] = str(row.get('block_group_id', 'N/A'))
-            k12_val = row.get('k12_pop', np.nan)
-            income_val = row.get('income', np.nan)
-            poverty_val = row.get('poverty_rate', np.nan)
-            feature['properties']['k12_pop'] = 0 if pd.isna(k12_val) else int(k12_val)
-            feature['properties']['income'] = 0 if pd.isna(income_val) else int(income_val)
-            feature['properties']['poverty_rate'] = 0.0 if pd.isna(poverty_val) else float(poverty_val)
-            if color_column in row:
-                color_val = row.get(color_column, np.nan)
-                if use_zones:
-                    feature['properties'][color_column] = str(color_val) if pd.notna(color_val) else 'Unknown'
-                else:
-                    feature['properties'][color_column] = 0.0 if pd.isna(color_val) else float(color_val)
-            feature['properties']['is_legit'] = bool(row.get('is_legit', False))
-    
-    # Build custom hover template with proper formatting for missing data
-    hover_template = '<b>Block Group: %{customdata[0]}</b><br>'
-    if use_zones:
-        hover_template += 'Zone: %{customdata[5]}<br>'
-    hover_template += 'EDI: %{customdata[1]}<br>'
-    hover_template += 'Median Income: %{customdata[2]}<br>'
-    hover_template += 'K-12 Population: %{customdata[3]}<br>'
-    hover_template += 'HPFI: %{customdata[4]}<br>'
-    hover_template += 'RHI: %{customdata[5]}<br>'
-    hover_template += 'Validated Data: %{customdata[7]}<extra></extra>'
-    
-    # Prepare custom data for hover with proper formatting
-    cleaned = plot_data.copy()
-
-    numeric_cols = ['income', 'k12_pop', 'hpfi', 'EDI']
-    if not use_zones:
-        numeric_cols.append(color_column)
-    
-    for col in numeric_cols:
-        if col in cleaned.columns:
-            cleaned[col] = cleaned[col].replace(-666666666, np.nan)
-            cleaned[col] = pd.to_numeric(cleaned[col], errors='coerce')
-
-    # Handle zone-based coloring
-    if use_zones == 'marketing':
-        # Marketing zones colorscale
-        zone_map = {
-            'Premium Growth Target': 0,
-            'Established Market': 1,
-            'Emerging Opportunity': 2,
-            'Foundation Building': 3
-        }
-        z_vals = cleaned['marketing_zone'].map(zone_map).fillna(3).astype(int).values
-        colorscale = [
-            [0.0, '#00B050'],     # Premium Growth - green
-            [0.33, '#0070C0'],    # Established Market - blue
-            [0.67, '#FFC000'],    # Emerging Opportunity - gold
-            [1.0, '#A0A0A0']      # Foundation Building - grey
-        ]
-    elif use_zones:
-        # EDI×HPFI overlay zones
-        zone_map = {
-            'Golden Zone': 0,
-            'Mission Zone': 1,
-            'Affluent Opportunity Zone': 2,
-            'Low Priority Zone': 3
-        }
-        z_vals = cleaned['zone'].map(zone_map).fillna(3).astype(int).values
-        colorscale = [
-            [0.0, '#00B050'],     # Golden Zone - green
-            [0.33, '#FFC000'],    # Mission Zone - gold
-            [0.67, '#0070C0'],    # Affluent Opportunity - blue
-            [1.0, '#C00000']      # Low Priority - red
-        ]
-    else:
-        z_series = cleaned[color_column] if color_column in cleaned.columns else pd.Series(np.nan, index=cleaned.index)
-        if z_series.isna().all():
-            fallback_col = 'k12_pop' if 'k12_pop' in cleaned.columns else None
-            if fallback_col:
-                st.warning(f"No valid values in '{color_column}' to color by; falling back to '{fallback_col}'.")
-                color_column = fallback_col
-                if color_column in cleaned.columns:
-                    z_series = pd.to_numeric(cleaned[color_column], errors='coerce')
-            else:
-                st.error("No valid data available for coloring the map.")
-                return go.Figure()
-        z_vals = z_series.fillna(0).astype(float).values
-        colorscale = "RdYlBu_r"
-
-    # Helper function to format values for display
-    def format_value(row, col, format_type='number'):
-        """Format value for hover display, showing 'N/A' for missing data"""
-        val = row.get(col, np.nan)
-        if pd.isna(val):
-            return 'N/A'
-        if format_type == 'currency':
-            return f'${val:,.0f}'
-        elif format_type == 'percent':
-            return f'{val:.1f}%'
-        elif format_type == 'integer':
-            return f'{int(val):,}'
-        elif format_type == 'hpfi':
-            return f'{val:.2f}'
-        else:
-            return f'{val:.1f}'
-
-    # Create formatted customdata
-    customdata_list = []
-    for _, row in cleaned.iterrows():
-        zone_val = str(row.get('zone', 'Unknown')) if use_zones else ''
-        customdata_list.append([
-            str(row.get('block_group_id', 'N/A')),
-            format_value(row, 'EDI', 'number'),
-            format_value(row, 'income', 'currency'),
-            format_value(row, 'k12_pop', 'integer'),
-            format_value(row, 'hpfi', 'hpfi'),
-            format_value(row, 'recruitment_heat_index', 'number') if 'recruitment_heat_index' in row.index else 'N/A',
-            zone_val,
-            'Yes' if bool(row.get('is_legit', False)) else 'No'
-        ])
-
-    customdata = np.array(customdata_list)
-    
-    # Create the choropleth using graph_objects for better control
-    fig = go.Figure()
-    
-    # Prepare colorbar based on mode
-    if use_zones == 'marketing':
-        colorbar = dict(
-            title='Marketing Zone',
-            tickvals=[0, 1, 2, 3],
-            ticktext=['Premium Growth', 'Established', 'Emerging', 'Foundation'],
-            len=0.7,
-            x=1.02
-        )
-    elif use_zones:
-        colorbar = dict(
-            title='Zone',
-            tickvals=[0, 1, 2, 3],
-            ticktext=['Golden', 'Mission', 'Affluent', 'Low Priority'],
-            len=0.7,
-            x=1.02
-        )
-    else:
-        colorbar = dict(
-            title=color_column.replace('_', ' ').title(),
-            len=0.7,
-            x=1.02
-        )
-    
-    # Add choropleth trace
-    fig.add_choroplethmapbox(
-        geojson=geojson_data,
-        locations=plot_data.index,
-        z=z_vals,
-        featureidkey="id",  # Link to the 'id' we set in the GeoJSON features
-        customdata=customdata,
-        colorscale=colorscale,
-        marker_opacity=0.7,
-        marker_line_width=1,
-        marker_line_color='white',
-        hovertemplate=hover_template,
-        colorbar=colorbar,
-        showscale=True
-    )
-
-    # Add a small color/legend box indicating quantiles for the color column (when not using zones)
-    if not use_zones:
-        try:
-            q10, q50, q90 = np.nanpercentile(cleaned[color_column].dropna().astype(float).values, [10, 50, 90])
-            st.markdown(f"**Legend ({color_column}):** Min: {np.nanmin(cleaned[color_column]):.2f} • 10th: {q10:.2f} • Median: {q50:.2f} • 90th: {q90:.2f} • Max: {np.nanmax(cleaned[color_column]):.2f}")
-        except Exception:
-            pass
-
-    # Optional overlays for new layers - use lower opacity choropleth for contextual layers
-    if show_vacancy_layer and 'vacancy_norm' in cleaned.columns:
-        fig.add_choroplethmapbox(
-            geojson=geojson_data,
-            locations=plot_data.index,
-            z=cleaned['vacancy_norm'].fillna(0).astype(float).values,
-            featureidkey='id',
-            colorscale='YlOrRd',
-            marker_opacity=0.35,
-            marker_line_width=0,
-            showscale=False,
-            name='Vacancy'
-        )
-    if show_crime_layer and 'crime_norm' in cleaned.columns:
-        fig.add_choroplethmapbox(
-            geojson=geojson_data,
-            locations=plot_data.index,
-            z=1.0 - cleaned['crime_norm'].fillna(0).astype(float).values,  # crime intensity
-            featureidkey='id',
-            colorscale='Reds',
-            marker_opacity=0.35,
-            marker_line_width=0,
-            showscale=False,
-            name='Crime Intensity'
-        )
-    if show_transit_layer and 'transit_norm' in cleaned.columns:
-        fig.add_choroplethmapbox(
-            geojson=geojson_data,
-            locations=plot_data.index,
-            z=cleaned['transit_norm'].fillna(0).astype(float).values,
-            featureidkey='id',
-            colorscale='Blues',
-            marker_opacity=0.35,
-            marker_line_width=0,
-            showscale=False,
-            name='Transit Access'
-        )
-    if show_food_layer and 'food_access_norm' in cleaned.columns:
-        fig.add_choroplethmapbox(
-            geojson=geojson_data,
-            locations=plot_data.index,
-            z=cleaned['food_access_norm'].fillna(0).astype(float).values,
-            featureidkey='id',
-            colorscale='Greens',
-            marker_opacity=0.35,
-            marker_line_width=0,
-            showscale=False,
-            name='Food Access'
-        )
-    if show_hud_layer and 'hud_presence' in cleaned.columns:
-        # Show HUD-assisted areas as a semi-transparent layer
-        fig.add_choroplethmapbox(
-            geojson=geojson_data,
-            locations=plot_data.index,
-            z=cleaned['hud_presence'].fillna(0).astype(float).values,
-            featureidkey='id',
-            colorscale=[[0, 'rgba(0,0,0,0)'], [1, '#000000']],
-            marker_opacity=0.25,
-            marker_line_width=0,
-            showscale=False,
-            name='HUD Assisted Areas'
-        )
-
-    # Compute bounds and center for auto-fit
+@st.cache_data
+def load_aux_layers():
+    comp = load_competition_schools()
+    public = load_census_schools()
     try:
-        # Ensure CRS is WGS84
-        if gdf_filtered.crs is None or gdf_filtered.crs.to_string() != "EPSG:4326":
-            gdf_plot = gdf_filtered.to_crs(epsg=4326)
-        else:
-            gdf_plot = gdf_filtered
-        
-        # Only use bounds if we have valid data
-        if len(gdf_plot) > 0:
-            minx, miny, maxx, maxy = gdf_plot.total_bounds
-            # Sanity check: Philadelphia bounds should be around -75.28 to -74.95 lon, 39.87 to 40.14 lat
-            if -76 < minx < -74 and -76 < maxx < -74 and 39 < miny < 41 and 39 < maxy < 41:
-                center_lat = (miny + maxy) / 2
-                center_lon = (minx + maxx) / 2
-                # Calculate zoom based on span
-                lat_span = maxy - miny
-                lon_span = maxx - minx
-                max_span = max(lat_span, lon_span)
-                zoom = 11 if max_span > 0.2 else 12
-            else:
-                # Bounds are invalid, use Philadelphia defaults
-                center_lat, center_lon = 39.952, -75.193
-                zoom = 11
-        else:
-            center_lat, center_lon = 39.952, -75.193
-            zoom = 11
-    except Exception:
-        center_lat, center_lon = 39.952, -75.193
-        zoom = 11
-
-    # Update layout for map with auto-fit to locations
-    fig.update_layout(
-        mapbox_style=map_style,
-        mapbox_center={"lat": center_lat, "lon": center_lon},
-        mapbox_zoom=zoom,
-        title=title,
-        height=700,
-        margin={"r":0,"t":30,"l":0,"b":0}
-    )
-    
-    # Add CCA campus markers (yellow stars with address)
-    cca_campuses = pd.DataFrame({
-        'name': ['CCA Main Campus (58th St)', 'CCA Baltimore Ave Campus'],
-        'lat': [39.9386, 39.9508],
-        'lon': [-75.2312, -75.2085],
-        'address': ['1939 S. 58th St. Philadelphia, PA', '4109 Baltimore Ave Philadelphia, PA']
-    })
-    
-    fig.add_scattermapbox(
-        lat=cca_campuses['lat'],
-        lon=cca_campuses['lon'],
-        mode='markers',
-        marker=dict(size=16, color='gold', symbol='star'),
-        text=cca_campuses['name'] + ' — ' + cca_campuses['address'],
-        name='CCA Campuses',
-        hovertemplate='<b>🏫 %{text}</b><br>' +
-                     'Lat: %{lat:.4f}<br>' +
-                     'Lon: %{lon:.4f}<extra></extra>'
-    )
-    
-    # Add current students if requested
-    if show_students and students_df is not None and not students_df.empty:
-        fig.add_scattermapbox(
-            lat=students_df['lat'],
-            lon=students_df['lon'],
-            mode='markers',
-            marker=dict(size=8, color='blue', opacity=0.9, symbol='circle'),
-            name='Current Students',
-            hovertemplate='<b>👨‍🎓 Current CCA Student</b><br>' +
-                         'Lat: %{lat:.4f}<br>' +
-                         'Lon: %{lon:.4f}<extra></extra>'
-        )
-        # Optional student density heatmap layer
-        if show_student_heatmap:
-            try:
-                fig.add_densitymapbox(
-                    lat=students_df['lat'],
-                    lon=students_df['lon'],
-                    radius=student_heatmap_radius,
-                    colorscale="Blues",
-                    opacity=0.45,
-                    name='Student Density'
-                )
-            except Exception:
-                pass
-
-    if show_competition and competition_df is not None and not competition_df.empty:
-        palette = {
-            'Catholic': '#8E0000',
-            'Charter': '#1F77B4',
-            'Private': '#7851A9',
-            'Christian': '#FF7F0E',
-            'CCA Campus': '#FFD700',
-            'Other': '#2CA02C'
-        }
-        comp_copy = competition_df.copy()
-        comp_copy['type'] = comp_copy['type'].fillna('Other').astype(str)
-        # Map colors based on school type - ensure we get a proper list
-        comp_copy['color'] = comp_copy['type'].apply(lambda t: palette.get(t, '#2CA02C'))
-        comp_copy['capacity'] = pd.to_numeric(comp_copy.get('capacity'), errors='coerce')
-
-        def grade_band(label: object) -> str:
-            if pd.isna(label):
-                return 'Unknown'
-            text = str(label).upper()
-            if 'K-12' in text:
-                return 'K-12'
-            if 'PK-12' in text:
-                return 'PK-12'
-            if 'PK-8' in text or 'K-8' in text:
-                return 'K-8'
-            if '9-12' in text:
-                return '9-12'
-            if '6-12' in text:
-                return '6-12'
-            return text.title()
-
-        def format_tuition(value: object) -> str:
-            if value is None or (isinstance(value, float) and np.isnan(value)):
-                return 'N/A'
-            if isinstance(value, str) and value.strip() == '':
-                return 'N/A'
-            numeric = pd.to_numeric(pd.Series([value]), errors='coerce').iloc[0]
-            if pd.isna(numeric):
-                return str(value)
-            return f"${numeric:,.0f}"
-
-        comp_copy['grade_band'] = comp_copy.get('grades').apply(grade_band) if 'grades' in comp_copy.columns else 'Unknown'
-        if 'tuition' in comp_copy.columns:
-            comp_copy['tuition_display'] = comp_copy['tuition'].apply(format_tuition)
-        else:
-            comp_copy['tuition_display'] = 'N/A'
-
-        comp_copy['capacity_display'] = comp_copy['capacity'].apply(
-            lambda v: f"{int(v):,}" if pd.notna(v) else 'n/a'
-        )
-        comp_copy['notes'] = comp_copy.get('notable_info', '').fillna('')
-
-        hover_cols = ['school_name', 'type', 'grade_band', 'tuition_display', 'capacity_display', 'address', 'notes']
-        custom_comp = comp_copy[hover_cols].fillna('').to_numpy()
-
-        # Ensure no NaN values in coordinates or colors
-        valid_idx = comp_copy['lat'].notna() & comp_copy['lon'].notna() & comp_copy['color'].notna()
-        if valid_idx.sum() > 0:
-            comp_valid = comp_copy[valid_idx].copy()
-            custom_valid = custom_comp[valid_idx.values]
-            
-            fig.add_scattermapbox(
-                lat=comp_valid['lat'].tolist(),
-                lon=comp_valid['lon'].tolist(),
-                mode='markers',
-                marker=dict(
-                    size=14,
-                    symbol='diamond',
-                    color=comp_valid['color'].tolist(),
-                    opacity=0.95
-                ),
-                customdata=custom_valid,
-                hovertemplate=(
-                    "<b>%{customdata[0]}</b><br>"
-                    "Type: %{customdata[1]}<br>"
-                    "Grades: %{customdata[2]}<br>"
-                    "Tuition: %{customdata[3]}<br>"
-                    "Seats: %{customdata[4]}<br>"
-                    "Address: %{customdata[5]}<br>"
-                    "%{customdata[6]}<extra></extra>"
-                ),
-                name='Competitor Schools'
-            )
-    # Highlight Premium Growth Target block groups as overlay
-    if highlight_premium and 'marketing_zone' in plot_data.columns:
-        premium = plot_data[plot_data['marketing_zone'] == 'Premium Growth Target']
-        if not premium.empty and 'lat' in premium.columns and 'lon' in premium.columns:
-            # Draw a subtle white outline marker first, then the colored marker inside to emulate an outline
-            fig.add_scattermapbox(
-                lat=premium['lat'],
-                lon=premium['lon'],
-                mode='markers',
-                marker=dict(size=22, color='white', opacity=0.7, symbol='circle'),
-                showlegend=False,
-                hoverinfo='skip'
-            )
-            fig.add_scattermapbox(
-                lat=premium['lat'],
-                lon=premium['lon'],
-                mode='markers',
-                marker=dict(size=18, color='magenta', opacity=0.9, symbol='circle'),
-                name='Premium Growth Targets',
-                hoverinfo='skip'
-            )
-    
-    return fig
-
-def calculate_marketing_priority_bg(demographics_df, cca_campuses):
-    """Balanced marketing priority that favors nearby, high-need, high-potential communities."""
-
-    marketing_scores = []
-
-    for _, bg in demographics_df.iterrows():
-        score = 0
-
-        # Distance to nearest campus (access & operational feasibility)
-        distances = [
-            haversine_km(bg['lat'], bg['lon'], campus['lat'], campus['lon'])
-            for _, campus in cca_campuses.iterrows()
-            if pd.notna(bg.get('lat')) and pd.notna(bg.get('lon'))
-        ]
-        min_distance = min(distances) if distances else 50
-        if min_distance <= 5:
-            score += 3
-        elif min_distance <= 10:
-            score += 2
-        elif min_distance <= 15:
-            score += 1
-
-        # High-Potential Family Index (economic capacity component)
-        hpfi = bg.get('hpfi', np.nan)
-        if pd.notna(hpfi):
-            if hpfi >= 0.65:
-                score += 2
-            elif hpfi >= 0.5:
-                score += 1
-
-        # Educational Desert Index (higher = greater unmet need)
-        edi = bg.get('EDI', np.nan)
-        if pd.notna(edi):
-            if edi >= 60:
-                score += 3
-            elif edi >= 45:
-                score += 2
-            elif edi >= 30:
-                score += 1
-
-        # Market size (school-age population)
-        k12_pop = bg.get('k12_pop', 0)
-        if k12_pop >= 250:
-            score += 2
-        elif k12_pop >= 125:
-            score += 1
-
-        # Faith alignment as optional tie-breaker
-        christian_pct = bg.get('%Christian', np.nan)
-        if pd.notna(christian_pct) and christian_pct >= 40:
-            score += 1
-
-        marketing_scores.append(score)
-
-    return marketing_scores
+        students = pd.read_csv('current_students_anonymized.csv')
+    except:
+        students = pd.DataFrame()
+    return comp, public, students
 
 
-def compute_student_proximity_norm(demos: pd.DataFrame, students_df: pd.DataFrame, radius_km: float = 5.0) -> pd.Series:
-    """Compute normalized proximity score based on counts of students within radius_km of block-group centroid.
+# --- SAFETY, COMMUTE, AND TRANSIT SCORING ---
 
-    Returns series with values 0-1 (higher = more nearby students).
+def calc_safety_score(lat, lon):
     """
-    if students_df is None or students_df.empty:
-        return pd.Series(0.0, index=demos.index)
-    students = students_df.copy()
-    students['lat'] = pd.to_numeric(students.get('lat'), errors='coerce')
-    students['lon'] = pd.to_numeric(students.get('lon'), errors='coerce')
-    students = students.dropna(subset=['lat', 'lon'])
-    counts = []
-    for _, row in demos.iterrows():
-        if pd.isna(row.get('lat')) or pd.isna(row.get('lon')):
-            counts.append(0)
-            continue
-        dists = [haversine_km(row['lat'], row['lon'], lat, lon) for lat, lon in zip(students['lat'], students['lon'])]
-        counts.append(sum(1 for d in dists if d <= radius_km))
-    return normalise_series(pd.Series(counts, index=demos.index))
-
-
-def compute_recruitment_heat_index(demos: pd.DataFrame, weights: Dict[str, float], students_df: pd.DataFrame = None) -> pd.Series:
-    """Compute Recruitment Heat Index (0-100) per block group.
-    Uses normalized component scores and a weighting profile.
+    Estimate neighborhood safety based on location.
+    Returns 0-1 score (1 = safest).
+    Based on Philadelphia crime patterns by neighborhood.
     """
+    if pd.isna(lat) or pd.isna(lon):
+        return 0.5
+    
+    # === HIGHER CRIME AREAS (score 0.2-0.4) ===
+    # North Philadelphia - Kensington/Badlands
+    if 39.98 <= lat <= 40.02 and -75.15 <= lon <= -75.10:
+        return 0.25
+    # North Philadelphia - general
+    if 39.97 <= lat <= 40.03 and -75.18 <= lon <= -75.12:
+        return 0.35
+    # Southwest Philadelphia
+    if 39.91 <= lat <= 39.94 and -75.24 <= lon <= -75.20:
+        return 0.40
+    # West Philadelphia - deeper areas
+    if 39.95 <= lat <= 39.97 and -75.26 <= lon <= -75.22:
+        return 0.45
+    
+    # === MODERATE AREAS (score 0.5-0.65) ===
+    # West Philadelphia - near CCA
+    if 39.93 <= lat <= 39.96 and -75.24 <= lon <= -75.20:
+        return 0.55
+    # South Philadelphia
+    if 39.91 <= lat <= 39.94 and -75.18 <= lon <= -75.14:
+        return 0.55
+    # Germantown
+    if 40.03 <= lat <= 40.07 and -75.18 <= lon <= -75.14:
+        return 0.50
+    # Northeast Philadelphia - lower
+    if 40.02 <= lat <= 40.06 and -75.10 <= lon <= -75.02:
+        return 0.60
+    
+    # === SAFER AREAS (score 0.7-0.85) ===
+    # Center City
+    if 39.94 <= lat <= 39.96 and -75.18 <= lon <= -75.15:
+        return 0.75
+    # University City
+    if 39.94 <= lat <= 39.96 and -75.21 <= lon <= -75.18:
+        return 0.70
+    # Chestnut Hill / Mt Airy
+    if 40.05 <= lat <= 40.10 and -75.22 <= lon <= -75.18:
+        return 0.80
+    # Manayunk / Roxborough
+    if 40.02 <= lat <= 40.06 and -75.24 <= lon <= -75.20:
+        return 0.75
+    # Far Northeast
+    if 40.05 <= lat <= 40.12 and -75.05 <= lon <= -74.98:
+        return 0.75
+    
+    # === PA SUBURBS (score 0.8-0.95) ===
+    # Lower Merion / Main Line
+    if 39.95 <= lat <= 40.08 and -75.35 <= lon <= -75.25:
+        return 0.90
+    # Delaware County suburbs
+    if 39.88 <= lat <= 39.95 and -75.35 <= lon <= -75.25:
+        return 0.85
+    
+    # === NJ SUBURBS (score 0.8-0.95) ===
+    if lon > -75.13:
+        # Camden City - higher crime
+        if 39.92 <= lat <= 39.97 and -75.13 <= lon <= -75.08:
+            return 0.35
+        # NJ suburbs generally safe
+        return 0.85
+    
+    # Default Philadelphia
+    return 0.55
+
+
+def calc_commute_score(lat, lon, dist_km):
+    """
+    Calculate commute score and estimated drive time to CCA.
+    Returns (score 0-1, estimated_minutes)
+    Higher score = better (shorter commute).
+    All commutes assumed to be driving.
+    
+    Realistic estimates based on Philadelphia traffic:
+    - Urban core: 4-5 min/km (stop lights, traffic, parking)
+    - Suburban to urban: 3-4 min/km + 5-10 min base
+    - NJ: Add 10-15 min for bridge crossing
+    """
+    if pd.isna(lat) or pd.isna(lon):
+        return 0.5, 30
+    
+    # Base time for getting in/out of car, parking, etc.
+    base_time = 5
+    
+    # Check location type
+    is_urban_core = (39.93 <= lat <= 39.97 and -75.22 <= lon <= -75.15)  # West Philly/University City
+    is_urban = (39.90 <= lat <= 40.05 and -75.25 <= lon <= -75.10)  # Greater Philadelphia
+    is_nj = lon > -75.10
+    
+    if is_urban_core:
+        # Very close to CCA but city traffic - 5 min/km
+        minutes = base_time + dist_km * 5
+    elif is_urban:
+        # Urban Philadelphia - lots of lights, traffic - 4 min/km + base
+        minutes = base_time + 5 + dist_km * 4
+    elif is_nj:
+        # NJ - bridge crossing adds significant time
+        bridge_time = 12  # Ben Franklin or Walt Whitman bridge delay
+        minutes = base_time + bridge_time + dist_km * 3
+    else:
+        # PA suburbs - faster roads but still need to get into city
+        # Upper Darby to University City example: ~5km, should be ~25 min
+        minutes = base_time + 8 + dist_km * 3.5
+    
+    # Cap at reasonable values
+    minutes = max(8, min(minutes, 65))  # At least 8 min drive anywhere
+    
+    # Score: 0 at 50+ min, 1.0 at 8 min
+    score = max(0, 1 - (minutes - 8) / 42)
+    
+    return round(score, 2), int(minutes)
+
+
+def calc_transit_score(lat, lon):
+    """
+    Calculate transit accessibility score for getting to CCA.
+    Returns (score 0-1, transit_type, can_student_commute)
+    
+    CCA Main Campus is near 60th St MFL station (~0.5 mile walk).
+    """
+    if pd.isna(lat) or pd.isna(lon):
+        return 0.3, "None", False
+    
+    # Check distance to nearest MFL station
+    min_mfl_dist = float('inf')
+    nearest_mfl = None
+    for station in MFL_STATIONS:
+        dist = haversine_km(lat, lon, station['lat'], station['lon'])
+        if dist < min_mfl_dist:
+            min_mfl_dist = dist
+            nearest_mfl = station['name']
+    
+    # Check distance to nearest BSL station
+    min_bsl_dist = float('inf')
+    for station in BSL_STATIONS:
+        dist = haversine_km(lat, lon, station['lat'], station['lon'])
+        if dist < min_bsl_dist:
+            min_bsl_dist = dist
+    
+    # Check distance to nearest Regional Rail
+    min_rr_dist = float('inf')
+    for station in REGIONAL_RAIL_STATIONS:
+        dist = haversine_km(lat, lon, station['lat'], station['lon'])
+        if dist < min_rr_dist:
+            min_rr_dist = dist
+    
+    # Distance from this location to CCA
+    dist_to_cca = min([haversine_km(lat, lon, c['lat'], c['lon']) 
+                       for _, c in CCA_CAMPUSES.iterrows()])
+    
+    # Scoring logic
+    # Best: Near MFL (direct line to 60th St near CCA)
+    # Good: Near BSL (transfer to MFL at City Hall)
+    # OK: Near Regional Rail (transfer downtown)
+    # Poor: No rail access
+    
+    if dist_to_cca <= 1.6:  # Within 1 mile of CCA
+        return 1.0, "Walk to CCA", True
+    
+    if min_mfl_dist <= 0.8:  # Within ~0.5 mile of MFL
+        return 0.9, f"MFL ({nearest_mfl})", True
+    
+    if min_mfl_dist <= 1.5:  # Within ~1 mile of MFL
+        return 0.75, f"MFL (walk)", True
+    
+    if min_bsl_dist <= 0.8:  # Near BSL (1 transfer to CCA)
+        return 0.65, "BSL + Transfer", True
+    
+    if min_rr_dist <= 1.0:  # Near Regional Rail
+        return 0.55, "Regional Rail", True
+    
+    if min_bsl_dist <= 1.5 or min_rr_dist <= 1.5:
+        return 0.4, "Transit (far)", False
+    
+    # NJ - would need Patco + transfer
+    if lon > -75.10:
+        return 0.3, "PATCO + Transfers", False
+    
+    return 0.2, "Drive Only", False
+
+# --- CALCULATIONS ---
+def enrich_data(demos, weights, schools_df=None):
     df = demos.copy()
-    # Ensure normalized fields exist
-    df['premium_flag'] = (df.get('marketing_zone') == 'Premium Growth Target').astype(float)
-    df['transit_norm'] = df.get('transit_norm', 0.0).fillna(0.0)
-    df['crime_norm'] = df.get('crime_norm', 0.0).fillna(0.0)
-    df['vacancy_norm'] = df.get('vacancy_norm', 0.0).fillna(0.0)
-    df['gini_norm'] = df.get('gini_norm', 0.0).fillna(0.0)
-    df['faith_norm'] = df.get('faith_norm', 0.0).fillna(0.0)
-    # student proximity normalized score
-    df['student_proximity_norm'] = compute_student_proximity_norm(df, students_df)
+    
+    # EDI (Educational Desert Index) - measures LACK of QUALITY school access
+    # 
+    # KEY INSIGHT: Access works DIFFERENTLY in different areas:
+    # 
+    # SUBURBAN NJ/PA: Guaranteed public school access
+    #   - Every resident has a SEAT in their district school
+    #   - No lottery, no waitlist, no rejection
+    #   - If district quality >= 0.75, area is WELL-SERVED (low EDI)
+    #
+    # PHILADELPHIA CITY: Competitive/lottery-based access
+    #   - Public schools exist but quality is low (avg 0.45)
+    #   - Good options (charters) have lotteries - 16K+ on waitlists
+    #   - Having a school nearby ≠ having ACCESS to quality education
+    #   - Must calculate supply/demand ratio for TRUE access
+    #
+    # Higher EDI = educational desert (no guaranteed quality access)
+    # Lower EDI = well-served (guaranteed access to quality school)
+    
+    def get_guaranteed_public_quality(lat, lon):
+        """
+        Check if location has GUARANTEED access to a quality public school.
+        Returns the quality rating if guaranteed access exists, else None.
+        
+        In NJ/PA suburbs, residents are guaranteed a seat in their district school.
+        In Philadelphia, public schools are low quality and good charters are lottery-based.
+        """
+        if pd.isna(lat) or pd.isna(lon):
+            return None
+        
+        # === NEW JERSEY (lon > -75.13 generally) ===
+        if lon > -75.13:
+            # Haddonfield (A+ district) - guaranteed 0.95
+            if 39.88 <= lat <= 39.91 and -75.04 <= lon <= -75.02:
+                return 0.95
+            
+            # Moorestown (A+ district) - guaranteed 0.95
+            if 39.96 <= lat <= 40.00 and -74.97 <= lon <= -74.92:
+                return 0.95
+            
+            # Cherry Hill (A district) - guaranteed 0.85
+            if 39.87 <= lat <= 39.93 and -75.02 <= lon <= -74.94:
+                return 0.85
+            
+            # Voorhees (A- district) - guaranteed 0.80
+            if 39.82 <= lat <= 39.87 and -74.98 <= lon <= -74.90:
+                return 0.80
+            
+            # Medford/Lenape (A- district) - guaranteed 0.80
+            if 39.80 <= lat <= 39.92 and -74.93 <= lon <= -74.80:
+                return 0.80
+            
+            # Collingswood (B+ district) - guaranteed 0.75
+            if 39.90 <= lat <= 39.93 and -75.08 <= lon <= -75.05:
+                return 0.75
+            
+            # Washington Township, Gloucester (B+ district) - guaranteed 0.75
+            if 39.74 <= lat <= 39.78 and -75.08 <= lon <= -75.04:
+                return 0.75
+            
+            # West Deptford (B+ district) - guaranteed 0.75
+            if 39.82 <= lat <= 39.86 and -75.15 <= lon <= -75.10:
+                return 0.75
+            
+            # Deptford Township (B district) - guaranteed 0.70
+            if 39.78 <= lat <= 39.83 and -75.12 <= lon <= -75.05:
+                return 0.70
+            
+            # Mantua Township (B district) - guaranteed 0.70
+            if 39.78 <= lat <= 39.82 and -75.18 <= lon <= -75.12:
+                return 0.70
+            
+            # Woodbury (B district) - guaranteed 0.70
+            if 39.82 <= lat <= 39.85 and -75.17 <= lon <= -75.13:
+                return 0.70
+            
+            # Paulsboro/low-income Gloucester areas - lower quality
+            if 39.82 <= lat <= 39.86 and -75.25 <= lon <= -75.18:
+                return 0.55
+            
+            # Camden City - NO quality guaranteed (public schools ~0.40)
+            if 39.92 <= lat <= 39.97 and -75.13 <= lon <= -75.08:
+                return None  # Must compete for charters
+            
+            # Other NJ suburban areas - assume decent public (B level)
+            if lon > -75.10:
+                return 0.70
+        
+        # === PENNSYLVANIA SUBURBS (west of Philly) ===
+        # Lower Merion (A+ district) - guaranteed 0.95
+        if 39.95 <= lat <= 40.08 and -75.35 <= lon <= -75.20:
+            return 0.95
+        
+        # Radnor (A+ district) - guaranteed 0.95
+        if 39.96 <= lat <= 40.05 and -75.42 <= lon <= -75.33:
+            return 0.95
+        
+        # Wallingford-Swarthmore (A+ district) - guaranteed 0.95
+        if 39.88 <= lat <= 39.92 and -75.38 <= lon <= -75.33:
+            return 0.95
+        
+        # Rose Tree Media (A district) - guaranteed 0.85
+        if 39.90 <= lat <= 39.94 and -75.42 <= lon <= -75.37:
+            return 0.85
+        
+        # Haverford Township (A district) - guaranteed 0.85
+        if 39.94 <= lat <= 40.00 and -75.32 <= lon <= -75.26:
+            return 0.85
+        
+        # Marple Newtown (A- district) - guaranteed 0.80
+        if 39.92 <= lat <= 39.97 and -75.38 <= lon <= -75.33:
+            return 0.80
+        
+        # Springfield Delco (A- district) - guaranteed 0.80
+        if 39.90 <= lat <= 39.95 and -75.37 <= lon <= -75.30:
+            return 0.80
+        
+        # Upper Darby (B district) - guaranteed but lower quality 0.65
+        if 39.94 <= lat <= 39.98 and -75.30 <= lon <= -75.24:
+            return 0.65
+        
+        # Ridley (B district) - guaranteed 0.70
+        if 39.86 <= lat <= 39.90 and -75.35 <= lon <= -75.30:
+            return 0.70
+        
+        # Chester-Upland (struggling district) - guaranteed but low quality
+        if 39.84 <= lat <= 39.87 and -75.38 <= lon <= -75.33:
+            return 0.45
+        
+        # General Delaware County suburbs not otherwise specified
+        if 39.85 <= lat <= 39.98 and -75.45 <= lon <= -75.30:
+            return 0.75  # Assume decent suburban public
+        
+        # === PHILADELPHIA CITY ===
+        # NO guaranteed quality access - public schools avg 0.45
+        # Good schools are charter-based (lottery) with 16K+ waitlists
+        if 39.87 <= lat <= 40.14 and -75.28 <= lon <= -75.05:
+            return None  # Must use competitive model
+        
+        # Default: unknown area, use competitive model
+        return None
+    
+    def calc_edi(row, schools, all_blocks):
+        if schools is None or schools.empty:
+            return 50
+        
+        lat, lon = row['lat'], row['lon']
+        k12_local = row.get('k12_pop', 100)
+        
+        if pd.isna(lat) or pd.isna(lon):
+            return 50
+        
+        # FIRST: Check for guaranteed public school access
+        guaranteed_quality = get_guaranteed_public_quality(lat, lon)
+        
+        if guaranteed_quality is not None:
+            # Area has GUARANTEED access to a public school of this quality
+            # Convert quality to EDI: higher quality = lower EDI
+            # Quality 0.95 → EDI ~5 (excellent guaranteed access)
+            # Quality 0.75 → EDI ~25 (good guaranteed access)
+            # Quality 0.70 → EDI ~30 (decent guaranteed access)
+            edi = max(0, (1 - guaranteed_quality) * 100)
+            return edi
+        
+        # NO guaranteed quality access - use COMPETITIVE model
+        # This applies to Philadelphia and Camden where good schools are lottery-based
+        
+        # Estimate capacity by school type
+        CAPACITY_BY_TYPE = {
+            'Public': 600,           # Large but LOW quality in Philly
+            'High School': 800,
+            'Middle School': 500,
+            'Elementary School': 400,
+            'Charter': 350,          # Good but LOTTERY-BASED (16K waitlist)
+            'Catholic': 300,
+            'Christian': 250,
+            'Private': 250,
+            'K-12 School': 400
+        }
+        
+        # Calculate competitive access to QUALITY schools only
+        # In Philly, having a nearby public school doesn't help if it's 0.45 quality
+        school_data = []
+        for _, school in schools.iterrows():
+            if pd.notna(school['lat']) and pd.notna(school['lon']):
+                dist = haversine_km(lat, lon, school['lat'], school['lon'])
+                quality = school.get('quality_rating', 0.5)
+                school_type = school.get('type', 'K-12 School')
+                capacity = CAPACITY_BY_TYPE.get(school_type, 500)
+                
+                # Only count schools with quality >= 0.6 as viable options
+                if quality >= 0.6:
+                    # Reduce effective capacity for charter/private (lottery/tuition barriers)
+                    if school_type in ['Charter', 'Catholic', 'Christian', 'Private']:
+                        effective_cap = capacity * 0.3  # Only ~30% chance of getting in
+                    else:
+                        effective_cap = capacity * quality  # Public weighted by quality
+                    
+                    school_data.append({
+                        'dist': dist,
+                        'quality': quality,
+                        'capacity': capacity,
+                        'effective_seats': effective_cap
+                    })
+        
+        if not school_data:
+            return 95  # No quality options = severe desert
+        
+        school_data.sort(key=lambda x: x['dist'])
+        
+        # Calculate supply/demand for QUALITY education
+        effective_seats_5km = sum(s['effective_seats'] for s in school_data if s['dist'] <= 5)
+        
+        # In urban areas, many more students compete for same schools
+        # Philadelphia has ~200K K-12 students, very high density
+        local_demand = max(k12_local * 40, 800)
+        
+        # Supply/Demand ratio
+        supply_demand = effective_seats_5km / local_demand
+        
+        # Convert to EDI score (50-100 range for competitive areas)
+        # Ratio 0.5+ = EDI 50 (some access), Ratio 0.1 = EDI 90 (severe shortage)
+        edi = max(50, min(95, 100 - (supply_demand * 100)))
+        
+        return edi
+    
+    if 'EDI' not in df.columns:
+        df['EDI'] = df.apply(lambda r: calc_edi(r, schools_df, df), axis=1)
+    
+    # HPFI Calculation
+    scaler = MinMaxScaler()
+    for c in ['income', 'k12_pop', 'poverty_rate', '%Christian']:
+        if c not in df.columns: df[c] = 0
+    
+    df['norm_income'] = scaler.fit_transform(df[['income']].fillna(0))
+    df['norm_k12'] = scaler.fit_transform(df[['k12_pop']].fillna(0))
+    df['norm_inv_poverty'] = 1 - scaler.fit_transform(df[['poverty_rate']].fillna(0))
+    df['norm_christian'] = scaler.fit_transform(df[['%Christian']].fillna(0))
+    
+    df['min_dist_km'] = df.apply(lambda r: min([haversine_km(r['lat'], r['lon'], c['lat'], c['lon']) for _,c in CCA_CAMPUSES.iterrows()]), axis=1)
+    df['norm_prox'] = np.exp(-df['min_dist_km'] / 8.0)
+    
+    # Safety Score
+    df['safety_score'] = df.apply(lambda r: calc_safety_score(r['lat'], r['lon']), axis=1)
+    
+    # Commute scoring (driving only) - returns (score, minutes)
+    commute_results = df.apply(lambda r: calc_commute_score(r['lat'], r['lon'], r['min_dist_km']), axis=1)
+    df['commute_score'] = commute_results.apply(lambda x: x[0])
+    df['commute_minutes'] = commute_results.apply(lambda x: x[1])
+    
+    # HPFI Calculation - now includes safety weight
+    df['hpfi'] = (
+        weights['income'] * df['norm_income'] +
+        weights['poverty'] * df['norm_inv_poverty'] +
+        weights['proximity'] * df['norm_prox'] +
+        weights['christian'] * df['norm_christian'] +
+        weights['k12'] * df['norm_k12'] +
+        weights.get('safety', 0) * df['safety_score']
+    ).clip(0, 1)
+    
+    # Priority Zones
+    hpfi_75 = df['hpfi'].quantile(0.75)
+    edi_75 = df['EDI'].quantile(0.75)
+    
+    def get_zone(r):
+        high_h = r['hpfi'] >= hpfi_75
+        high_e = r['EDI'] >= edi_75
+        if high_h and high_e: return "High Priority"
+        if high_h: return "Strong Potential"
+        if high_e: return "Underserved"
+        return "Low Priority"
+    
+    df['zone'] = df.apply(get_zone, axis=1)
+    return df
 
-    rhi_numer = (
-        weights.get('rhi_premium', 0) * df['premium_flag'] +
-        weights.get('rhi_transit', 0) * df['transit_norm'] +
-        weights.get('rhi_crime', 0) * df['crime_norm'] +
-        weights.get('rhi_vacancy', 0) * df['vacancy_norm'] +
-        weights.get('rhi_gini', 0) * df['gini_norm'] +
-        weights.get('rhi_student_proximity', 0) * df['student_proximity_norm'] +
-        weights.get('rhi_faith', 0) * df['faith_norm']
-    )
-    denom = sum(weights.get(k, 0) for k in weights if k.startswith('rhi_'))
-    denom = denom if denom > 0 else 1.0
-    rhi_score = (rhi_numer / denom).clip(0, 1)
-    return (rhi_score * 100).round(2)
-
-# Main app
+# --- MAIN APP ---
 def main():
-    st.title("� Cornerstone Christian Academy Growth Opportunity Explorer")
-    st.markdown("""
-    <div style='background: linear-gradient(135deg, #0070C0 0%, #005A9C 100%); padding: 1.5rem; border-radius: 8px; color: white; margin-bottom: 1rem;'>
-        <h3 style='color: white; margin: 0;'>Informative Insights for Strategic Outreach & Inclusive Expansion</h3>
-        <p style='margin: 0.5rem 0 0 0; opacity: 0.9;'>Identify high-potential areas to broaden CCA's reach across diverse socioeconomic groups and support balanced, inclusive growth. Data from ACS 2023.</p>
-    </div>
-    """, unsafe_allow_html=True)
-    # Quick How-to box for users
-    with st.container():
-        st.info(
-            "How to use the dashboard: 1) Ensure Presentation Mode is ON for professional view; 2) Set Geographic Scope (default 15km); 3) Set Income & HPFI thresholds to focus; 4) Toggle map layers; 5) For crime, set date range and click 'Fetch Crime Data'; 6) Export filtered results via 'Download Filtered Data as CSV'."
-        )
+    st.title("CCA Growth Explorer")
     
-    # Add explanation of EDI in an expandable section
-    with st.expander("ℹ️ Understanding the Educational Desert Index (EDI)"):
+    # Quick action buttons at top
+    col_title1, col_title2, col_title3 = st.columns([2, 1, 1])
+    with col_title2:
+        if st.button("Reset Filters", use_container_width=True):
+            st.session_state.clear()
+            st.rerun()
+    with col_title3:
+        show_help = st.button("Help", use_container_width=True)
+    
+    if show_help:
+        st.info("""
+        **Quick Start:** Adjust filters in the sidebar to find high-potential neighborhoods. 
+        Look for "High Priority" zones (green) - these are affluent areas with limited school options.
+        """)
+    
+    # Usage Instructions (collapsed by default)
+    with st.expander("How to Use This Dashboard", expanded=False):
         st.markdown("""
-        ### What EDI Measures
-
-        The Educational Desert Index uses **rigorous 2-Step Floating Catchment Area (2SFCA) analysis** to identify neighborhoods with limited access to quality educational infrastructure. This is the same methodology used in academic research for healthcare access and food deserts.
-
-        **Higher EDI scores = worse educational environment** (true educational deserts).
-
-        #### How We Calculate It (2SFCA Method)
-        1. **Accessibility (40%)** – Uses gravity-weighted school access model. Nearby schools count more than distant ones due to exponential distance decay (β=5km). Measures actual capacity availability, not just proximity.
-        2. **School-to-Student Ratio (30%)** – Local capacity vs K-12 population using gravity-weighted catchment areas. Accounts for overcrowding and shared demand.
-        3. **Socioeconomic Need (20%)** – Combines poverty rate (70%) and % adults without HS diploma (30%). Real barriers to educational access.
-        4. **Infrastructure (10%)** – Estimated broadband access using poverty as proxy (lower poverty areas have ~85-95% access, higher poverty ~60-70%). Future versions will use ACS S2801 broadband data when available.
-
-        Each component is normalized 0–1 and weighted, then scaled to 0–100.
-
-        #### Why 2SFCA is Better
-        - **Prevents edge effects**: Distant mega-schools don't dominate scores
-        - **Gravity decay**: Schools 1km away count far more than schools 10km away
-        - **True crowding**: Measures seats-per-weighted-student, not simple ratios
-        - **Research-validated**: Standard method in spatial accessibility analysis
-
-        #### Reading the Score
-        - **70–100** → True educational deserts: far from schools, overcrowded, high poverty, poor infrastructure
-        - **40–69** → Moderate challenges: some gaps in access or capacity
-        - **0–39** → Well-served: good school access, sufficient seats, better infrastructure
-
-        Use EDI to identify underserved areas where CCA can fill real educational infrastructure gaps.
+        **CCA Growth Explorer** helps identify high-potential neighborhoods for Cornerstone Christian Academy enrollment growth.
+        
+        **Getting Started:**
+        1. Use the **Filters** in the left sidebar to narrow down areas of interest
+        2. Adjust the **distance slider** to expand or contract the search radius from CCA campuses
+        3. Set **income range** to focus on target demographics
+        4. Use **Min K-12 Population** to exclude areas with few school-age children
+        
+        **Understanding the Scores:**
+        - **HPFI (High Potential Family Index):** 0-1 score combining income, proximity, K-12 population, and other factors. Higher = more potential.
+        - **EDI (Educational Desert Index):** Measures how underserved an area is. Higher = greater need for quality education options.
+        
+        **Priority Zones:**
+        - **High Priority:** High HPFI + High EDI — Best opportunities (affluent AND underserved)
+        - **Strong Potential:** High HPFI — Good family demographics
+        - **Underserved:** High EDI — Mission-aligned but may need financial aid support
+        - **Low Priority:** Lower scores on both metrics
+        
+        **Using the Map:**
+        - Color the map by different metrics using the dropdown
+        - Hover over areas to see detailed data
+        - Gold circles mark CCA campus locations
+        - Toggle competitor schools on/off with the checkbox
+        
+        **Exporting Data:**
+        - Switch to the **Data** tab to view the full table
+        - Click **Download CSV** to export filtered results for further analysis
         """)
     
-    # Load data
-    with st.spinner("Loading Census block group data..."):
-        try:
-            gdf, demographics, k12_summary = load_block_group_data()
-            # Also fetch tract data for validation
-            tract_enrollment_data, _ = fetch_tract_enrollment_data()
-        except RuntimeError as exc:
-            st.error(str(exc))
-            st.stop()
-        current_students = load_current_students()
-
-    # Validate K-12 total
-    validation_result = validate_k12_total(demographics, tract_enrollment_data)
+    # Load Data
+    with st.spinner("Loading data..."):
+        gdf, raw_demos = load_core_data()
+        comp_schools, pub_schools, students_df = load_aux_layers()
     
-    if not validation_result['is_valid']:
-        st.info("📊 K-12 Enrollment Data Notice")
-        st.write(validation_result['notices'][0])
-        if 'low_tracts' in validation_result:
-            st.write("**Tracts with lowest enrollment rates:**")
-            st.dataframe(validation_result['low_tracts'], use_container_width=True)
-        elif 'high_tracts' in validation_result:
-            st.write("**Tracts with highest enrollment rates:**")
-            st.dataframe(validation_result['high_tracts'], use_container_width=True)
-    else:
-        if validation_result.get('messages'):
-            st.success(validation_result['messages'][0])
+    if raw_demos.empty:
+        st.error("No demographic data found.")
+        st.stop()
     
-    total_students_loaded = k12_summary.get('k12_total', float('nan'))
-    total_block_groups_loaded = k12_summary.get('block_groups', len(demographics))
-    imputed_count = k12_summary.get('imputed_count', 0)
-    component_gaps = k12_summary.get('component_gaps', 0)
-    legacy_total = k12_summary.get('legacy_k12_total')
-    bg_cache_ts = k12_summary.get('bg_cache_timestamp', 'N/A')
-    tract_cache_ts = k12_summary.get('tract_cache_timestamp', 'N/A')
-
-    # Compute 'legit' derived counts to display: use only rows flagged is_legit
-    try:
-        legit_demographics = demographics[demographics['is_legit']].copy()
-        legit_total_students = float(legit_demographics['k12_pop'].sum()) if 'k12_pop' in legit_demographics.columns else float('nan')
-        legit_block_groups_count = len(legit_demographics)
-    except Exception:
-        legit_total_students = total_students_loaded
-        legit_block_groups_count = total_block_groups_loaded
-
-    # Load school data
-    try:
-        competition_schools = load_competition_schools()
-    except RuntimeError as exc:
-        st.error(f"Unable to load competition schools: {exc}")
-        competition_schools = pd.DataFrame()
-
-    try:
-        census_schools = load_census_schools()
-    except RuntimeError as exc:
-        st.error(f"Unable to load Census school landmarks: {exc}")
-        census_schools = pd.DataFrame()
-
-    # Prepare school data
-    if not competition_schools.empty:
-        if 'type' not in competition_schools.columns:
-            competition_schools['type'] = 'Other'
-        else:
-            competition_schools['type'] = competition_schools['type'].fillna('Other')
-        competition_schools['capacity'] = pd.to_numeric(competition_schools.get('capacity'), errors='coerce').fillna(350)
-        competition_schools['lat'] = pd.to_numeric(competition_schools.get('lat'), errors='coerce')
-        competition_schools['lon'] = pd.to_numeric(competition_schools.get('lon'), errors='coerce')
-        competition_schools = competition_schools.dropna(subset=['lat', 'lon'])
-    else:
-        competition_schools = pd.DataFrame(columns=['school_name', 'type', 'lat', 'lon', 'capacity', 'grades', 'notable_info', 'address'])
-
-    if not census_schools.empty:
-        census_schools['lat'] = pd.to_numeric(census_schools.get('lat'), errors='coerce')
-        census_schools['lon'] = pd.to_numeric(census_schools.get('lon'), errors='coerce')
-        census_schools['capacity'] = pd.to_numeric(census_schools.get('capacity'), errors='coerce').fillna(400)
-        census_schools = census_schools.dropna(subset=['lat', 'lon'])
-    else:
-        census_schools = pd.DataFrame(columns=['school_name', 'lat', 'lon', 'capacity'])
-
-    # Calculate seat capacity
-    public_capacity = 0.0
-    competitor_capacity = 0.0
-
-    if 'capacity' in census_schools.columns and not census_schools.empty:
-        public_capacity = pd.to_numeric(census_schools['capacity'], errors='coerce').fillna(0).sum()
-
-    if 'capacity' in competition_schools.columns and not competition_schools.empty:
-        competitor_capacity = pd.to_numeric(competition_schools['capacity'], errors='coerce').fillna(0).sum()
-
-    total_students_value = total_students_loaded if not np.isnan(total_students_loaded) else None
-    student_per_public_seat = None
-    student_per_combined_seat = None
-    if total_students_value is not None and public_capacity > 0:
-        student_per_public_seat = total_students_value / public_capacity
-    if total_students_value is not None and (public_capacity + competitor_capacity) > 0:
-        student_per_combined_seat = total_students_value / (public_capacity + competitor_capacity)
-
-    # ==================== SIDEBAR: DATA SUMMARY ====================
-    st.sidebar.title("🎯 CCA Growth Dashboard")
+    # Clean income data - Census uses negative values for missing data
+    raw_demos['income'] = raw_demos['income'].apply(lambda x: x if x > 0 else np.nan)
     
-    with st.sidebar.expander("📊 Market Overview", expanded=True):
-        st.metric(
-            "Total K-12 Students (valid data)",
-            f"{legit_total_students:,.0f}",
-            help="ACS 2023 modeled enrollment across Philadelphia block groups — only block groups with valid demographic data"
-        )
-        if total_students_loaded != legit_total_students:
-            st.caption(f"Raw total (including imputed/invalid rows): {total_students_loaded:,.0f}")
-        st.metric(
-            "Block Groups Analyzed",
-            f"{legit_block_groups_count:,}",
-            help="Number of block groups with valid data shown by default"
-        )
-        if total_block_groups_loaded != legit_block_groups_count:
-            st.caption(f"Raw block groups loaded: {total_block_groups_loaded:,}")
-        
-        if student_per_public_seat is not None:
-            st.metric(
-                "Students per Public Seat",
-                f"{student_per_public_seat:.1f}:1",
-                help=f"{public_capacity:,.0f} public school seats available"
-            )
-        
-        st.caption(f"📅 Data: ACS 2023 | Updated {bg_cache_ts[:10]}")
-        # Presentation / Professional Mode toggle (enforced default True to hide imputed or incomplete data in presentation)
-        presentation_mode = st.checkbox("Presentation Mode: Professional (hide imputed/incomplete data)", value=True, help='Enable to ensure only validated data is shown. Removes imputed/invalid rows from KPIs and maps.')
+    # --- SIDEBAR: ALL FILTERS ---
+    st.sidebar.header("Filters")
     
-    # Data Quality Details (collapsible)
-    with st.sidebar.expander("📋 Data Quality & Technical Details"):
-        st.write(f"""
-        **Data Validation:**
-        - Block groups with imputed K-12: {imputed_count:,}
-        - Cache timestamps: BG={bg_cache_ts[:10]}, Tract={tract_cache_ts[:10]}
-        """)
-        
-        if legacy_total and not np.isnan(legacy_total):
-            st.caption(f"Legacy CSV K-12 total (pre-ACS refresh): {legacy_total:,.0f}")
-        
-        st.write(f"""
-        **School Capacity:**
-        - Public seats: {public_capacity:,.0f}
-        - Competitor seats: {competitor_capacity:,.0f}
-        - Combined seats: {public_capacity + competitor_capacity:,.0f}
-        """)
-        
-        if student_per_combined_seat is not None:
-            st.caption(f"Students per seat (with competitors): {student_per_combined_seat:.2f}:1")
-        
-        st.write(f"""
-        **School Data Loaded:**
-        - Census public schools: {len(census_schools):,}
-        - Competition schools: {len(competition_schools):,}
-        """)
+    # Reset button in sidebar too
+    if st.sidebar.button("Reset All Filters", use_container_width=True):
+        st.session_state.clear()
+        st.rerun()
     
-    # ==================== SIDEBAR: FILTERS ====================
     st.sidebar.divider()
-    st.sidebar.header("🎯 Target Area Filters")
     
-    # Geographic Filter
-    with st.sidebar.expander("📍 **Geographic Scope**", expanded=True):
-        max_distance = st.slider(
-            "Distance from CCA Campuses (km)",
-            min_value=1,
-            max_value=35,
-            value=15,
-            step=1,
-            help="Focus on block groups within this distance of CCA campuses",
-            key="distance_slider"
-        )
-        st.caption(f"✓ Showing areas within {max_distance}km of campuses")
-        # New quick controls for Premium Growth Targets
-        show_premium_only = st.checkbox("Show Premium Growth Targets Only", value=False, help="Filter map to Premium Growth Targets (HPFI & moderate EDI)")
-        premium_top_n = st.selectbox("Top N Premium Targets", options=["All", 50, 100], index=0)
+    # Distance
+    radius = st.sidebar.slider("Max Distance from Campus (km)", 1, 35, 15, key="radius")
     
-    # CCA Campus locations
-    cca_campuses = pd.DataFrame({
-        'name': ['CCA Main Campus (58th St)', 'CCA Baltimore Ave Campus'],
-        'lat': [39.9386, 39.9508],
-        'lon': [-75.2312, -75.2085],
-        'address': ['1939 S. 58th St. Philadelphia, PA', '4109 Baltimore Ave Philadelphia, PA']
-    })
+    # Income - filter out missing/invalid values for range calculation
+    valid_incomes = raw_demos['income'].dropna()
+    min_inc = int(valid_incomes.min()) if len(valid_incomes) > 0 else 0
+    max_inc = int(valid_incomes.max()) if len(valid_incomes) > 0 else 250000
+    income_range = st.sidebar.slider("Income Range ($)", min_inc, max_inc, (min_inc, max_inc), step=5000, key="income")
     
-    # Filter demographics by distance
-    def is_within_distance(row):
-        for _, campus in cca_campuses.iterrows():
-            dist = haversine_km(row['lat'], row['lon'], campus['lat'], campus['lon'])
-            if dist <= max_distance:
-                return True
-        return False
+    # K-12 Population
+    min_k12 = st.sidebar.number_input("Min K-12 Population", 0, 1000, 0, key="k12")
     
-    demographics_filtered = demographics[demographics.apply(is_within_distance, axis=1)]
+    # HPFI Threshold
+    hpfi_min = st.sidebar.slider("Min HPFI Score", 0.0, 1.0, 0.0, 0.05)
     
-    # Optional live data refresh (Census API)
-    census_api_key = get_census_api_key()
-    if fetch_live_block_groups and census_api_key:
-        with st.sidebar.expander("🔄 Live Census Data Refresh"):
-            st.caption("Pull fresh ACS data from Census API")
-            if st.button("Refresh From Census API", key="refresh_census"):
-                with st.spinner("Pulling live ACS data (may take ~30s)..."):
-                    try:
-                        fetch_live_block_groups()
-                        st.success("Live data downloaded. Please rerun the app to see updates.")
-                    except Exception as e:
-                        st.error(f"Live fetch failed: {e}")
+    # Commute Filter
+    max_commute = st.sidebar.slider("Max Commute (minutes)", 10, 60, 45, 5)
     
-    highlight_hpfi = False
-
-    if not demographics_filtered.empty:
-        # Income Filter
-        with st.sidebar.expander("💰 **Income Targeting**", expanded=False):
-            income_series = pd.to_numeric(demographics_filtered['income'], errors='coerce').dropna()
-            if income_series.empty:
-                income_floor, income_ceiling = 0, 250000
-            else:
-                income_floor = int(income_series.min())
-                income_ceiling = int(income_series.max())
-                if income_floor == income_ceiling:
-                    income_ceiling = income_floor + 1
-
-            income_range = st.slider(
-                "Median Household Income Range",
-                min_value=income_floor,
-                max_value=income_ceiling,
-                value=(income_floor, income_ceiling),
-                step=1000,
-                format="$%d",
-                help="Target areas by economic capacity"
-            )
-            demographics_filtered = demographics_filtered[
-                demographics_filtered['income'].between(income_range[0], income_range[1], inclusive="both")
-            ]
-            st.caption(f"✓ Showing incomes from ${income_range[0]:,} to ${income_range[1]:,}")
-
-        # Map Layer Controls (moved earlier for clarity)
-        with st.sidebar.expander("🗺️ **Map Layers**", expanded=False):
-            show_current_students = st.checkbox(
-                "Show Current Student Locations", 
-                value=False,
-                help="Overlay current CCA student addresses"
-            )
-            highlight_premium = st.checkbox("Highlight Premium Growth Targets", value=True, help="Overlay a visual highlight on Premium Growth Target block groups", key='highlight_premium')
-            show_vacancy_layer = st.checkbox('Show Vacancy Layer', value=False, key='show_vacancy_layer')
-            show_crime_layer = st.checkbox('Show Crime Layer', value=False, key='show_crime_layer')
-            # Crime date range and fetch controls - allow live fetch using Carto SQL
-            with st.expander("🕒 Crime Date Range & Fetch"):
-                default_end = pd.Timestamp.utcnow().date()
-                default_start = default_end - pd.Timedelta(days=30)
-                crime_start = st.date_input('Crime Start Date', default_start)
-                crime_end = st.date_input('Crime End Date', default_end)
-                crime_format = st.selectbox('Crime Fetch Format', options=['geojson', 'csv'], index=0)
-                if st.button('Fetch Latest Crime Data (Carto)'):
-                    # Build SQL and fetch
-                    try:
-                        from scripts.ingest.ingest_external_layers import build_cartosql_url
-                        sql = (
-                            "SELECT *, ST_Y(the_geom) AS lat, ST_X(the_geom) AS lon "
-                            "FROM incidents_part1_part2 "
-                            f"WHERE dispatch_date_time >= '{crime_start} 00:00:00' "
-                            f"AND dispatch_date_time < '{crime_end} 23:59:59'"
-                        )
-                        url = build_cartosql_url(sql, fmt=crime_format)
-                        with st.spinner("Fetching crime data... this may take a few seconds"):
-                            resp = requests.get(url, timeout=60)
-                            resp.raise_for_status()
-                            if crime_format == 'geojson':
-                                payload = resp.json()
-                                points = []
-                                for f in payload.get('features', []):
-                                    props = f.get('properties', {})
-                                    geom = f.get('geometry') or {}
-                                    # ST_X/ST_Y should already have been added; try both
-                                    lat = props.get('lat') or (geom.get('coordinates')[1] if geom.get('coordinates') else None)
-                                    lon = props.get('lon') or (geom.get('coordinates')[0] if geom.get('coordinates') else None)
-                                    if lat and lon:
-                                        points.append({'lat': lat, 'lon': lon})
-                            else:
-                                df = pd.read_csv(io.StringIO(resp.text))
-                                points = []
-                                if 'latitude' in df.columns and 'longitude' in df.columns:
-                                    for _, r in df.iterrows():
-                                        try:
-                                            lat = r['latitude']
-                                            lon = r['longitude']
-                                            points.append({'lat': lat, 'lon': lon})
-                                        except Exception:
-                                            pass
-                        # Convert points to GeoDataFrame and aggregate
-                        if 'points' in locals() and points:
-                            pts_df = pd.DataFrame(points)
-                            try:
-                                import geopandas as gpd
-                                pts_gdf = gpd.GeoDataFrame(pts_df, geometry=gpd.points_from_xy(pts_df['lon'], pts_df['lat']), crs='EPSG:4326')
-                                bg_gdf = gdf[['GEOID', 'geometry']].copy()
-                                bg_gdf['block_group_id'] = bg_gdf['GEOID'].astype(str)
-                                joined = gpd.sjoin(bg_gdf, pts_gdf, how='left', predicate='intersects')
-                                agg = joined.groupby('block_group_id').size().reset_index(name='crimes')
-                                # Merge population & compute crimes per 1k
-                                demo = demographics.set_index('block_group_id')
-                                agg['total_pop'] = agg['block_group_id'].map(demo['total_pop']).fillna(0)
-                                agg['crimes_per_1k'] = agg.apply(lambda r: (r['crimes']/r['total_pop']*1000) if r['total_pop']>0 else 0, axis=1)
-                                # Write CSV to data/external
-                                ex_path = EXTERNAL_DATA_DIR / 'crime_per_block_group.csv'
-                                agg[['block_group_id', 'crimes_per_1k']].to_csv(ex_path, index=False)
-                                st.success('Crime data fetched and aggregated to block groups. The map will refresh.')
-                            except Exception as exc:
-                                st.error(f'Failed to aggregate crime data: {exc}')
-                    except Exception as exc:
-                        st.error(f'Crime fetch failed: {exc}')
-            show_transit_layer = st.checkbox('Show Transit Layer', value=False, key='show_transit_layer')
-            show_food_layer = st.checkbox('Show Food Access Layer', value=False, key='show_food_layer')
-            show_hud_layer = st.checkbox('Show HUD Zones Layer', value=False, key='show_hud_layer')
-            show_competition_overlay = st.checkbox(
-                "Show Other Educational Options", 
-                value=True,
-                help="Display charter, private, and Catholic schools"
-            )
-
-            if not competition_schools.empty:
-                type_options = sorted(competition_schools['type'].dropna().unique())
-            else:
-                type_options = []
-            selected_competition_types = st.multiselect(
-                "School Types to Display",
-                options=type_options,
-                default=type_options,
-                help="Select which types of schools to show"
-            ) if type_options else []
-
-            include_competitors_in_edi = st.checkbox(
-                "Include Other Schools in EDI Calculation",
-                value=False,
-                help="Adds charter/private capacity to EDI supply"
-            )
-            if include_competitors_in_edi:
-                st.caption("✓ EDI includes all school seats")
-            else:
-                st.caption("EDI uses CCA/public seats only")
-
-        # HPFI Focus
-        with st.sidebar.expander("🎯 **High-Potential Focus**", expanded=False):
-            highlight_hpfi = st.checkbox(
-                "Show Only High HPFI Areas (≥ 0.75)", 
-                value=False,
-                help="Focus on top-quartile areas with strongest tuition-paying potential"
-            )
-            if highlight_hpfi:
-                st.caption("✓ Filtering to premium growth opportunities")
-
-        # Refinement Options
-        with st.sidebar.expander("🔧 **Refinement Options**", expanded=False):
-            # Filter out non-residential block groups
-            hide_zero_pop = st.checkbox(
-                "Exclude Non-Residential Areas", 
-                value=True,
-                help="Removes parks, industrial zones with 0 population"
-            )
-            if hide_zero_pop:
-                before_count = len(demographics_filtered)
-                demographics_filtered = demographics_filtered[demographics_filtered['total_pop'] > 0].copy()
-                removed = before_count - len(demographics_filtered)
-                if removed > 0:
-                    st.caption(f"✓ Filtered out {removed} non-residential blocks")
-            
-            # Additional filter for 0 K-12 population
-            hide_zero_k12 = st.checkbox(
-                "Exclude Areas with 0 K-12 Children",
-                value=False,
-                help="Focus exclusively on areas with school-age population"
-            )
-            if hide_zero_k12:
-                before_count = len(demographics_filtered)
-                demographics_filtered = demographics_filtered[demographics_filtered['k12_pop'] > 0].copy()
-                removed = before_count - len(demographics_filtered)
-                if removed > 0:
-                    st.caption(f"✓ Filtered out {removed} blocks with 0 K-12 children")
-            
-            # Poverty rate filter - now optional and off by default
-            apply_poverty_filter = st.checkbox("Apply Economic Opportunity Filter", value=False)
-            if apply_poverty_filter:
-                valid_poverty = demographics_filtered['poverty_rate'].dropna()
-                if len(valid_poverty) > 0:
-                    poverty_range = st.slider(
-                        "Economic Stability Range (inverse poverty %)", 
-                        float(valid_poverty.min()), 
-                        float(valid_poverty.max()), 
-                        (float(valid_poverty.min()), float(valid_poverty.max())),
-                        step=1.0,
-                        help="Lower poverty rates may indicate greater economic capacity"
-                    )
-                    demographics_filtered = demographics_filtered[
-                        (demographics_filtered['poverty_rate'] >= poverty_range[0]) &
-                        (demographics_filtered['poverty_rate'] <= poverty_range[1])
-                    ]
-                else:
-                    st.warning("No valid economic data available")
-            # Decay options for EDI calculation (advanced)
-            st.subheader("EDI Decay Settings (Advanced)")
-            decay_type = st.selectbox(
-                "Decay Function",
-                options=['exponential', 'gaussian', 'linear', 'fixed'],
-                index=0,
-                help="Choose the gravity decay function used in the EDI 2SFCA algorithm"
-            )
-            decay_param = st.slider("Decay Parameter (km)", min_value=1.0, max_value=25.0, value=5.0, step=0.5, help="Beta or radius parameter for the selected decay function")
-            catchment_km = st.slider("Catchment Radius (km)", min_value=5, max_value=50, value=15, step=1, help="Max distance to consider schools for EDI calculations")
-
-            # Include imputed/missing data toggle — default False to show only legitimate data
-            if presentation_mode:
-                include_non_legit = False
-                st.caption("Presentation Mode is ON: imputed/incomplete data is hidden for professional use.")
-            else:
-                include_non_legit = st.checkbox("Include imputed / incomplete data", value=False, help="If checked, include block groups with missing or flagged data in visuals (not recommended for production)")
-            if include_non_legit:
-                st.caption("⚠️ Including imputed / incomplete data may show unreliable figures")
-        
-    else:
-        st.info("📍 No block groups found within the specified radius. Try expanding your geographic scope.")
-        demographics_filtered = demographics.iloc[0:0]
-        
-    # Map Layer Controls are shown in the Geographic/Income filter section above
-
-        include_competitors_in_edi = st.checkbox(
-            "Include Other Schools in EDI Calculation",
-            value=False,
-            help="Adds charter/private capacity to EDI supply"
-        )
-        if include_competitors_in_edi:
-            st.caption("✓ EDI includes all school seats")
-        else:
-            st.caption("EDI uses CCA/public seats only")
+    # Data Quality
+    hide_sparse = st.sidebar.checkbox("Hide areas with 0 population", value=True)
     
-    # Methodology & Help
-    with st.sidebar.expander("ℹ️ **About This Dashboard**"):
-        st.write("""
-        **Purpose:** Identify high-potential growth areas for CCA enrollment.
-        
-        **Key Metrics:**
-        - **HPFI** (High-Potential Family Index): Economic capacity for tuition
-        - **EDI** (Educational Desert Index): Access gaps in Christian education
-        
-        **How to Use:**
-        1. Set geographic scope (default 15km from campuses)
-        2. Apply income filters to target economic segments
-        3. Choose visualization mode (HPFI, EDI, or Overlay)
-        4. Explore Top 10 tables for specific block groups
-        5. Export filtered data for deeper analysis
-        
-        **Data Sources:**
-        - Census ACS 2023 (demographics, income, K-12 enrollment)
-        - NCES school directories (public schools)
-        - Local charter/private school data
-        
-        📧 Questions? Contact your data team.
-        """)
-        st.write("**Layer definitions (Normalized to 0–1 where shown):**")
-        st.write("- `vacancy_norm`: Higher => more vacant properties (derived from vacant_pct).")
-        st.write("- `crime_norm`: Higher => safer (1 - normalized(crimes_per_1k)).")
-        st.write("- `transit_norm`: Higher => better transit access (normalized stop count).")
-        st.write("- `food_access_norm`: Higher => better access to grocery / food stores.")
-        st.write("- `gini_norm`: Higher => higher inequality.")
-        st.write("- `hud_presence`: 1 if HUD-assisted property present else 0.")
-
-    # Scoring Weights control - keep compact and resettable
-    with st.sidebar.expander("⚖️ Scoring Weights", expanded=False):
-        st.write("Tune internal scoring weights for HPFI / EDI / Recruitment Heat Index. Use 'Restore Defaults' to reset.")
-        col_hpfi, col_edi, col_rhi = st.columns(3)
-        # Ensure session state defaults
-        if 'hpfi_weights' not in st.session_state:
-            st.session_state['hpfi_weights'] = {k: v for k, v in WEIGHT_DEFAULTS.items() if k.startswith('hpfi')}
-        if 'edi_weights' not in st.session_state:
-            st.session_state['edi_weights'] = {k: v for k, v in WEIGHT_DEFAULTS.items() if k.startswith('edi')}
-        if 'rhi_weights' not in st.session_state:
-            st.session_state['rhi_weights'] = {k: v for k, v in WEIGHT_DEFAULTS.items() if k.startswith('rhi')}
-        with col_hpfi:
-            st.markdown("**HPFI**")
-            for key in list(st.session_state['hpfi_weights'].keys()):
-                label = key.replace('hpfi_', '').replace('_', ' ').title()
-                st.session_state['hpfi_weights'][key] = st.slider(label, 0.0, 1.0, float(st.session_state['hpfi_weights'][key]), 0.01)
-        with col_edi:
-            st.markdown("**EDI**")
-            for key in list(st.session_state['edi_weights'].keys()):
-                label = key.replace('edi_', '').replace('_', ' ').title()
-                st.session_state['edi_weights'][key] = st.slider(label, 0.0, 1.0, float(st.session_state['edi_weights'][key]), 0.01)
-        with col_rhi:
-            st.markdown("**RHI**")
-            for key in list(st.session_state['rhi_weights'].keys()):
-                label = key.replace('rhi_', '').replace('_', ' ').title()
-                st.session_state['rhi_weights'][key] = st.slider(label, 0.0, 1.0, float(st.session_state['rhi_weights'][key]), 0.01)
-        if st.button('Restore Default Weights'):
-            st.session_state['hpfi_weights'] = {k: v for k, v in WEIGHT_DEFAULTS.items() if k.startswith('hpfi')}
-            st.session_state['edi_weights'] = {k: v for k, v in WEIGHT_DEFAULTS.items() if k.startswith('edi')}
-            st.session_state['rhi_weights'] = {k: v for k, v in WEIGHT_DEFAULTS.items() if k.startswith('rhi')}
-
-    # Map style and optional student heatmap controls
-    with st.sidebar.expander("🗺️ Map Style & Display", expanded=False):
-        st.selectbox('Base Map Style', ['open-street-map', 'carto-positron', 'satellite-streets'], index=0, key='map_style')
-        st.checkbox('Show Student Heatmap (Kernel)', value=False, key='show_student_heatmap')
-        st.slider('Student Heatmap Radius (px)', 5, 50, 15, key='student_heatmap_radius')
-
-    supply_columns = ['lat', 'lon', 'capacity']
-
-    def prepare_supply_frame(df: pd.DataFrame) -> pd.DataFrame:
-        if df is None or df.empty:
-            return pd.DataFrame(columns=supply_columns)
-        prepared = df.copy()
-        for coord_col in ['lat', 'lon']:
-            if coord_col in prepared.columns:
-                prepared[coord_col] = pd.to_numeric(prepared[coord_col], errors='coerce')
-        if 'capacity' not in prepared.columns:
-            prepared['capacity'] = 0
-        prepared['capacity'] = pd.to_numeric(prepared['capacity'], errors='coerce').fillna(0)
-        prepared = prepared.dropna(subset=['lat', 'lon']) if not prepared.empty else prepared
-        return prepared[supply_columns]
-
-    census_supply = prepare_supply_frame(census_schools)
-    competitor_supply = prepare_supply_frame(competition_schools)
-
-    if include_competitors_in_edi and not competitor_supply.empty:
-        edi_supply_df = pd.concat([census_supply, competitor_supply], ignore_index=True)
-    else:
-        edi_supply_df = census_supply.copy()
-
-    print(
-        f"[EDI] Supply rows: {len(edi_supply_df)} | Competitor supply included: {include_competitors_in_edi and not competitor_supply.empty}"
-    )
-
-    # Compute global EDI and HPFI before applying additional filters so scores remain comparable
-    demographics = ensure_block_group_id(demographics.copy())
-    # Ensure 'is_legit' is present and normalized
-    if 'is_legit' not in demographics.columns:
-        demographics = compute_legitimate_flag_module(demographics)
-
-    if not edi_supply_df.empty:
-        with st.spinner("Calculating Educational Desert Index across all block groups..."):
-            demographics_for_edi = demographics[(demographics['total_pop'] > 0) & (demographics.get('is_legit', False) == True)].copy()
-            if not demographics_for_edi.empty:
-                edi_full_df = compute_edi_block_groups(
-                    demographics_for_edi, edi_supply_df,
-                    catchment_km=catchment_km, beta_km=decay_param, decay_type=decay_type, decay_param=decay_param,
-                    comp_weights=(
-                        st.session_state.get('edi_weights', {}).get('edi_access', 0.40),
-                        st.session_state.get('edi_weights', {}).get('edi_ratio', 0.30),
-                        st.session_state.get('edi_weights', {}).get('edi_need', 0.20),
-                        st.session_state.get('edi_weights', {}).get('edi_infra', 0.10),
-                    )
-                )
-                demographics = demographics.drop(columns=['EDI'], errors='ignore')
-                demographics = demographics.merge(
-                    edi_full_df[['block_group_id', 'EDI']],
-                    on='block_group_id',
-                    how='left'
-                )
-                demographics['EDI'] = demographics['EDI'].fillna(0.0)
-            else:
-                demographics['EDI'] = 0.0
-    else:
-        demographics = demographics.drop(columns=['EDI'], errors='ignore')
-        demographics['EDI'] = 0.0
-
-    demographics = demographics.drop(columns=['hpfi'], errors='ignore')
-    # Compute HPFI only on legitimate rows (presentation mode compliance)
-    try:
-        hpfi_df = demographics[demographics['is_legit'] == True].copy()
-        if not hpfi_df.empty:
-            hpfi_df = compute_hpfi_scores(hpfi_df, edi_col="EDI", weights=st.session_state.get('hpfi_weights'))
-            # Remove any existing hpfi column and merge back
-            demographics['hpfi'] = np.nan
-            demographics.loc[hpfi_df.index, 'hpfi'] = hpfi_df['hpfi'].values
-        else:
-            demographics['hpfi'] = np.nan
-    except Exception:
-        demographics['hpfi'] = 0.0
-    hpfi_global_75 = float(demographics['hpfi'].quantile(0.75)) if not demographics['hpfi'].empty else 0.75
-
-    edi_zone_df = compute_edi_hpfi_zones(demographics, edi_col="EDI", hpfi_col="hpfi")
-    demographics['zone'] = edi_zone_df['zone']
-    global_edi_75 = float(edi_zone_df['_edi_75_threshold'].iloc[0]) if not edi_zone_df.empty else 0.0
-
-    marketing_zone_df = compute_marketing_zones(demographics, edi_col="EDI", hpfi_col="hpfi")
-    demographics['marketing_zone'] = marketing_zone_df['marketing_zone']
-    if not marketing_zone_df.empty:
-        marketing_edi_25 = float(marketing_zone_df['_edi_25_threshold'].iloc[0])
-        marketing_edi_75 = float(marketing_zone_df['_edi_75_threshold'].iloc[0])
-        marketing_hpfi_50 = float(marketing_zone_df['_hpfi_50_threshold'].iloc[0])
-        marketing_hpfi_75 = float(marketing_zone_df['_hpfi_75_threshold'].iloc[0])
-        marketing_k12_median = float(marketing_zone_df['_k12_median'].iloc[0])
-    else:
-        marketing_edi_25 = marketing_edi_75 = 0.0
-        marketing_hpfi_50 = marketing_hpfi_75 = 0.0
-        marketing_k12_median = 0.0
-
-    demographics['marketing_priority'] = calculate_marketing_priority_bg(demographics, cca_campuses)
-
-    # Compute Recruitment Heat Index (RHI)
-    try:
-        rhi_weights = st.session_state.get('rhi_weights', {k: v for k, v in WEIGHT_DEFAULTS.items() if k.startswith('rhi')})
-        # Compute RHI only for legitimate rows
-        rhi_df = demographics[demographics['is_legit'] == True].copy()
-        rhi_df['recruitment_heat_index'] = compute_recruitment_heat_index(rhi_df, rhi_weights, current_students)
-        demographics['recruitment_heat_index'] = np.nan
-        demographics.loc[rhi_df.index, 'recruitment_heat_index'] = rhi_df['recruitment_heat_index'].values
-    except Exception:
-        demographics['recruitment_heat_index'] = np.nan
-
-    # Ensure expected metrics columns exist even if upstream calculations failed
-    demographics = ensure_block_group_id(demographics)
-    metrics_defaults = {
-        'EDI': 0.0,
-        'hpfi': np.nan,
-        'nearest_campus_km': np.nan,
-        'zone': 'Unassigned',
-        'marketing_zone': 'General',
-        'marketing_priority': 0.0,
-    }
-    for col, default in metrics_defaults.items():
-        if col not in demographics.columns:
-            demographics[col] = default
-
-    metrics_cols = ['block_group_id', 'EDI', 'hpfi', 'nearest_campus_km', 'zone', 'marketing_zone', 'marketing_priority']
-    metric_only_cols = [col for col in metrics_cols if col != 'block_group_id']
-    demographics_filtered = demographics_filtered.drop(columns=[col for col in metric_only_cols if col in demographics_filtered.columns], errors='ignore')
-
-    demographics_filtered = ensure_block_group_id(demographics_filtered)
-
-    demographics_filtered = demographics_filtered.merge(
-        demographics[metrics_cols],
-        on='block_group_id',
-        how='left'
-    )
-    # Apply Premium Growth Target quick filter if enabled (use top-N if set)
-    if 'show_premium_only' in locals() and show_premium_only:
-        demographics_filtered = demographics_filtered[demographics_filtered['marketing_zone'] == 'Premium Growth Target'].copy()
-        if premium_top_n in (50, 100):
-            demographics_filtered = demographics_filtered.nlargest(premium_top_n, 'marketing_priority')
-    
-    # Visualization selection
-    color_options = {
-        'High-Potential Family Index (HPFI)': 'hpfi',
-        'Educational Desert Index (EDI)': 'EDI',
-        'Recruitment Heat Index (RHI)': 'recruitment_heat_index',
-        'Median Household Income': 'income',
-        'First-Generation %': 'first_gen_pct'
-    }
-    
-    map_mode_options = list(color_options.keys()) + ['Overlay: EDI × HPFI', 'High-Potential Marketing Zones']
-    selected_map_mode = st.sidebar.selectbox(
-        "Map Visualization Mode:",
-        map_mode_options,
-        index=0,
-        help="Choose focus: tuition-paying potential (HPFI), access gaps (EDI), recruitment intensity (RHI), socioeconomics, or overlay/marketing zones"
+    # Zone Filter
+    zone_filter = st.sidebar.multiselect(
+        "Priority Zones",
+        ["High Priority", "Strong Potential", "Underserved", "Low Priority"],
+        default=["High Priority", "Strong Potential", "Underserved", "Low Priority"]
     )
     
-    # If overlay mode or marketing zones, use zone colors; otherwise use the classic selection
-    if selected_map_mode == 'Overlay: EDI × HPFI':
-        selected_metric = 'Overlay: EDI × HPFI'
-    elif selected_map_mode == 'High-Potential Marketing Zones':
-        selected_metric = 'High-Potential Marketing Zones'
+    # Weight Adjustments
+    with st.sidebar.expander("Score Weights"):
+        weights = {
+            'income': st.slider("Income", 0.0, 1.0, 0.40, 0.05),
+            'poverty': st.slider("Low Poverty", 0.0, 1.0, 0.15, 0.05),
+            'proximity': st.slider("Proximity", 0.0, 1.0, 0.10, 0.05),
+            'christian': st.slider("Christian %", 0.0, 1.0, 0.10, 0.05),
+            'k12': st.slider("K-12 Pop", 0.0, 1.0, 0.10, 0.05),
+            'safety': st.slider("Safety", 0.0, 1.0, 0.15, 0.05),
+        }
+    
+    # Load schools with quality ratings for EDI calculation
+    if os.path.exists('schools_with_quality.csv'):
+        all_schools = pd.read_csv('schools_with_quality.csv')
     else:
-        selected_metric = selected_map_mode
+        # Fallback to combining without quality ratings
+        all_schools = pd.concat([comp_schools, pub_schools], ignore_index=True) if not pub_schools.empty else comp_schools
+        all_schools['quality_rating'] = 0.5  # Default rating
     
-    # Ensure key metrics are available in the filtered view without recomputing on the subset
-    if not demographics_filtered.empty:
-        demographics_filtered = demographics_filtered.copy()
-
-        def distance_based_edi(row: pd.Series) -> float:
-            if row.get('total_pop', 0) == 0:
-                return 0.0
-            if cca_campuses.empty:
-                return 0.0
-            distances = [
-                haversine_km(row['lat'], row['lon'], c['lat'], c['lon'])
-                for _, c in cca_campuses.iterrows()
-                if pd.notna(row.get('lat')) and pd.notna(row.get('lon'))
-            ]
-            min_dist = min(distances) if distances else 50.0
-            return min(100.0, min_dist * 5.0)
-
-        if 'EDI' not in demographics_filtered.columns:
-            if not edi_supply_df.empty:
-                with st.spinner("Calculating Educational Desert Index..."):
-                    try:
-                        demographics_with_pop = demographics_filtered[(demographics_filtered['total_pop'] > 0) & (demographics_filtered.get('is_legit', False) == True)].copy()
-                        if not demographics_with_pop.empty:
-                            edi_df = compute_edi_block_groups(
-                                demographics_with_pop, edi_supply_df,
-                                catchment_km=catchment_km, beta_km=decay_param, decay_type=decay_type, decay_param=decay_param,
-                                comp_weights=(
-                                    st.session_state.get('edi_weights', {}).get('edi_access', 0.40),
-                                    st.session_state.get('edi_weights', {}).get('edi_ratio', 0.30),
-                                    st.session_state.get('edi_weights', {}).get('edi_need', 0.20),
-                                    st.session_state.get('edi_weights', {}).get('edi_infra', 0.10),
-                                )
-                            )
-                            demographics_filtered = demographics_filtered.merge(
-                                edi_df[['block_group_id', 'EDI']],
-                                on='block_group_id',
-                                how='left'
-                            )
-                        else:
-                            demographics_filtered['EDI'] = 0.0
-                    except Exception as exc:
-                        st.sidebar.warning(f"⚠️ EDI calculation issue: {str(exc)[:100]}")
-                        demographics_filtered['EDI'] = demographics_filtered.apply(distance_based_edi, axis=1)
+    # Enrich full dataset
+    full_data = enrich_data(raw_demos, weights, all_schools)
+    full_data = compute_legitimate_flag_module(full_data)
+    
+    # Apply Filters
+    df = full_data.copy()
+    df['dist_check'] = df.apply(lambda r: min([haversine_km(r['lat'], r['lon'], c['lat'], c['lon']) for _,c in CCA_CAMPUSES.iterrows()]), axis=1)
+    df = df[df['dist_check'] <= radius]
+    df = df[df['income'].between(income_range[0], income_range[1])]
+    df = df[df['k12_pop'] >= min_k12]
+    df = df[df['hpfi'] >= hpfi_min]
+    df = df[df['commute_minutes'] <= max_commute]
+    df = df[df['zone'].isin(zone_filter)]
+    if hide_sparse:
+        df = df[df['total_pop'] > 0]
+    df = df[df['is_legit'] == True]
+    
+    # --- KPIs ---
+    c1, c2, c3, c4 = st.columns(4)
+    c1.metric("Block Groups", len(df))
+    c2.metric("K-12 Students", f"{df['k12_pop'].sum():,.0f}")
+    c3.metric("Avg HPFI", f"{df['hpfi'].mean():.2f}")
+    c4.metric("Avg Income", f"${df['income'].mean():,.0f}")
+    
+    # --- ACTIONABLE INSIGHTS ---
+    st.divider()
+    
+    # Calculate top opportunities
+    if len(df) > 0:
+        # Top 5 neighborhoods by HPFI (most likely to convert)
+        top_hpfi = df.nlargest(5, 'hpfi')[['block_group_id', 'hpfi', 'income', 'k12_pop', 'zone', 'EDI', 'commute_minutes']]
+        
+        # High Priority zones (affluent + underserved = sweet spot)
+        high_priority = df[df['zone'] == 'High Priority']
+        
+        # Calculate enrollment potential (rough estimate: 1-2% of K-12 population as potential enrollees)
+        estimated_potential = int(df['k12_pop'].sum() * 0.015)  # 1.5% capture rate
+        
+        # Identify best marketing opportunities by county
+        if 'state_fips' in df.columns:
+            df['state'] = df['state_fips'].apply(lambda x: 'PA' if x == '42' else 'NJ')
+            state_summary = df.groupby('state').agg({
+                'k12_pop': 'sum',
+                'hpfi': 'mean',
+                'income': 'mean'
+            }).round(2)
+        
+        insight_col1, insight_col2 = st.columns([1, 1])
+        
+        with insight_col1:
+            st.subheader("Top 5 Target Neighborhoods")
+            st.markdown("*These areas have the highest potential for enrollment growth:*")
+            
+            for i, (_, row) in enumerate(top_hpfi.iterrows(), 1):
+                zone_label = f"({row['zone']})"
+                st.markdown(f"""
+                **{i}. Block Group {row['block_group_id'][-7:]}** {zone_label}
+                - HPFI Score: **{row['hpfi']:.2f}** | Income: **${row['income']:,.0f}**
+                - K-12 Students: **{row['k12_pop']:,.0f}** | Commute: **{row['commute_minutes']:.0f} min**
+                """)
+        
+        with insight_col2:
+            st.subheader("Enrollment Opportunity Summary")
+            
+            # Key metrics
+            st.metric("Estimated Enrollment Potential", f"{estimated_potential:,} students", 
+                     help="Based on 1.5% capture rate of K-12 population in filtered areas")
+            
+            st.metric("High Priority Areas", f"{len(high_priority):,} neighborhoods",
+                     help="Areas with both high income AND limited school options")
+            
+            if len(high_priority) > 0:
+                hp_students = high_priority['k12_pop'].sum()
+                st.metric("Students in High Priority Zones", f"{hp_students:,.0f}")
+            
+            # Quick wins
+            st.markdown("---")
+            st.markdown("**Quick Win Recommendations:**")
+            if len(high_priority) > 0:
+                st.success(f"Focus marketing on **{len(high_priority)}** High Priority areas with **{high_priority['k12_pop'].sum():,.0f}** students")
+            
+            avg_commute = df['commute_minutes'].mean()
+            if avg_commute < 30:
+                st.success(f"Average commute is **{avg_commute:.0f} min** - emphasize convenient location")
             else:
-                st.sidebar.info("No school supply data available; using a distance-based EDI estimate.")
-                demographics_filtered['EDI'] = demographics_filtered.apply(distance_based_edi, axis=1)
+                st.warning(f"Average commute is **{avg_commute:.0f} min** - consider transportation partnerships")
+            
+            # EDI insight
+            high_edi = df[df['EDI'] >= 60]
+            if len(high_edi) > 0:
+                st.info(f"**{len(high_edi)}** areas show high educational need (EDI >= 60)")
+    
+    st.divider()
+    
+    # --- TABS ---
+    tab_map, tab_data, tab_forecast = st.tabs(["Map", "Data", "Forecasting"])
+    
+    with tab_map:
+        gdf_filtered = gdf[gdf['GEOID'].isin(df['block_group_id'])]
+        map_df = gdf_filtered.merge(df, left_on='GEOID', right_on='block_group_id', suffixes=('_geo', ''))
+        
+        color_col = st.selectbox("Color by:", ['hpfi', 'zone', 'EDI', 'income', 'k12_pop', 'safety_score', 'commute_minutes'])
+        
+        if not map_df.empty:
+            # Reverse color scale for commute (lower is better)
+            if color_col == 'commute_minutes':
+                color_scale = "RdYlGn_r"
+            elif color_col == 'EDI':
+                color_scale = "RdYlGn_r"  # Higher EDI = worse = red
+            elif color_col in ['hpfi', 'income', 'safety_score', 'transit_score']:
+                color_scale = "RdYlGn"
+            else:
+                color_scale = "Viridis"
+            
+            fig = px.choropleth_mapbox(
+                map_df,
+                geojson=json.loads(map_df.geometry.to_json()),
+                locations=map_df.index,
+                color=color_col,
+                color_continuous_scale=color_scale,
+                mapbox_style="carto-positron",
+                center={"lat": 40.0, "lon": -75.15},
+                zoom=10,
+                opacity=0.6,
+                hover_data={
+                    'GEOID': True,
+                    'income': ':$,.0f',
+                    'k12_pop': True,
+                    'zone': True,
+                    'hpfi': ':.2f',
+                    'EDI': ':.0f',
+                    'safety_score': ':.2f',
+                    'commute_minutes': True
+                },
+                height=600
+            )
+            
+            fig.add_trace(go.Scattermapbox(
+                lat=CCA_CAMPUSES['lat'], lon=CCA_CAMPUSES['lon'],
+                mode='markers+text',
+                marker=go.scattermapbox.Marker(
+                    size=20, 
+                    color='gold',
+                    opacity=1
+                ),
+                text=CCA_CAMPUSES['name'],
+                textposition='top center',
+                textfont=dict(size=11, color='black'),
+                name="CCA Campuses",
+                hovertext=CCA_CAMPUSES['address']
+            ))
+            
+            # Add a second layer for star effect (smaller dark center)
+            fig.add_trace(go.Scattermapbox(
+                lat=CCA_CAMPUSES['lat'], lon=CCA_CAMPUSES['lon'],
+                mode='markers',
+                marker=go.scattermapbox.Marker(
+                    size=8, 
+                    color='darkgoldenrod',
+                    opacity=1
+                ),
+                name="CCA (center)",
+                showlegend=False
+            ))
+            
+            show_competitors = st.checkbox("Show Competitor Schools")
+            if show_competitors and not comp_schools.empty:
+                fig.add_trace(go.Scattermapbox(
+                    lat=comp_schools['lat'], lon=comp_schools['lon'],
+                    mode='markers',
+                    marker=go.scattermapbox.Marker(size=8, color='red'),
+                    text=comp_schools.get('school_name', ''),
+                    name="Competitors"
+                ))
+            
+            st.plotly_chart(fig, use_container_width=True)
         else:
-            demographics_filtered['EDI'] = pd.to_numeric(demographics_filtered['EDI'], errors='coerce').fillna(0.0)
-
-        if 'hpfi' not in demographics_filtered.columns or demographics_filtered['hpfi'].isna().all():
-            demographics_filtered = compute_hpfi_scores(
-                demographics_filtered,
-                edi_col="EDI" if 'EDI' in demographics_filtered.columns else 'edi',
-                weights=st.session_state.get('hpfi_weights')
-            )
-
-        if 'marketing_priority' not in demographics_filtered.columns:
-            demographics_filtered['marketing_priority'] = calculate_marketing_priority_bg(demographics_filtered, cca_campuses)
-
-        if 'zone' not in demographics_filtered.columns and not edi_zone_df.empty:
-            demographics_filtered = demographics_filtered.merge(
-                edi_zone_df[['block_group_id', 'zone']],
-                on='block_group_id',
-                how='left'
-            )
-
-        if 'marketing_zone' not in demographics_filtered.columns and not marketing_zone_df.empty:
-            demographics_filtered = demographics_filtered.merge(
-                marketing_zone_df[['block_group_id', 'marketing_zone']],
-                on='block_group_id',
-                how='left'
-            )
-
-    if 'first_gen_pct' not in demographics_filtered.columns and '%first_gen' in demographics_filtered.columns:
-        demographics_filtered['first_gen_pct'] = pd.to_numeric(demographics_filtered['%first_gen'], errors='coerce')
-    else:
-        demographics_filtered['first_gen_pct'] = pd.to_numeric(demographics_filtered.get('first_gen_pct'), errors='coerce')
-
-    # Exclude imputed/incomplete data unless user opts in
-    try:
-        if not include_non_legit:
-            before_count = len(demographics_filtered)
-            if 'is_legit' in demographics_filtered.columns:
-                demographics_filtered = demographics_filtered[demographics_filtered['is_legit'] == True].copy()
-            removed = before_count - len(demographics_filtered)
-            if removed > 0:
-                st.caption(f"✓ Excluded {removed} block groups due to missing/invalid demographic fields (use 'Include imputed / incomplete data' to include them)")
-    except Exception:
-        pass
+            st.warning("No data matches current filters.")
     
-
-    hpfi_threshold = None
-    if highlight_hpfi and not demographics_filtered.empty:
-        if 'hpfi' in demographics_filtered.columns:
-            hpfi_threshold = hpfi_global_75 if 'hpfi_global_75' in locals() else demographics_filtered['hpfi'].quantile(0.75)
-            demographics_filtered = demographics_filtered[demographics_filtered['hpfi'] >= hpfi_threshold]
+    with tab_data:
+        display_cols = ['block_group_id', 'zone', 'hpfi', 'EDI', 'income', 'k12_pop', 'safety_score', 
+                        'commute_minutes', 'min_dist_km']
+        available_cols = [c for c in display_cols if c in df.columns]
+        display_df = df[available_cols].sort_values('hpfi', ascending=False)
+        
+        st.dataframe(display_df, use_container_width=True, height=500)
+        
+        csv = display_df.to_csv(index=False)
+        st.download_button("Download CSV", csv, "cca_growth_data.csv", "text/csv")
+    
+    with tab_forecast:
+        st.subheader("Enrollment Growth Forecasting")
+        st.markdown("*Project future enrollment based on current data and growth assumptions*")
+        
+        # Forecasting inputs
+        fc1, fc2, fc3 = st.columns(3)
+        
+        with fc1:
+            current_enrollment = st.number_input("Current CCA Enrollment", value=500, min_value=0, step=50)
+        with fc2:
+            capture_rate = st.slider("Target Capture Rate (%)", 0.5, 5.0, 1.5, 0.25)
+        with fc3:
+            growth_years = st.slider("Forecast Period (Years)", 1, 10, 5)
+        
+        st.divider()
+        
+        # Calculate projections
+        total_k12_pool = df['k12_pop'].sum()
+        high_priority_pool = df[df['zone'] == 'High Priority']['k12_pop'].sum() if len(df[df['zone'] == 'High Priority']) > 0 else 0
+        strong_potential_pool = df[df['zone'] == 'Strong Potential']['k12_pop'].sum() if len(df[df['zone'] == 'Strong Potential']) > 0 else 0
+        
+        # Different capture rates by zone
+        hp_capture = capture_rate * 2 / 100  # High Priority has 2x capture rate
+        sp_capture = capture_rate * 1.5 / 100  # Strong Potential has 1.5x capture rate
+        base_capture = capture_rate / 100
+        
+        # Year-over-year projections
+        years = list(range(growth_years + 1))
+        enrollment_projection = [current_enrollment]
+        
+        # Assume graduated growth (takes time to reach full capture rate)
+        for year in range(1, growth_years + 1):
+            year_factor = min(year / 3, 1.0)  # Reaches full potential by year 3
+            
+            new_from_hp = high_priority_pool * hp_capture * year_factor
+            new_from_sp = strong_potential_pool * sp_capture * year_factor
+            other_pool = total_k12_pool - high_priority_pool - strong_potential_pool
+            new_from_other = other_pool * base_capture * year_factor
+            
+            # Account for attrition (5% per year)
+            retained = enrollment_projection[-1] * 0.95
+            new_enrollment = retained + new_from_hp + new_from_sp + new_from_other
+            enrollment_projection.append(int(new_enrollment))
+        
+        # Display forecast
+        fc_col1, fc_col2 = st.columns([2, 1])
+        
+        with fc_col1:
+            # Create projection chart
+            fig_forecast = go.Figure()
+            fig_forecast.add_trace(go.Scatter(
+                x=years,
+                y=enrollment_projection,
+                mode='lines+markers',
+                name='Projected Enrollment',
+                line=dict(color='blue', width=3),
+                marker=dict(size=10)
+            ))
+            
+            # Add target line
+            target = current_enrollment * 2  # Double enrollment as target
+            fig_forecast.add_hline(y=target, line_dash="dash", line_color="green", 
+                                  annotation_text=f"Target: {target}")
+            
+            fig_forecast.update_layout(
+                title="Enrollment Growth Projection",
+                xaxis_title="Years",
+                yaxis_title="Total Enrollment",
+                height=400
+            )
+            
+            st.plotly_chart(fig_forecast, use_container_width=True)
+        
+        with fc_col2:
+            st.markdown("### Key Projections")
+            
+            year_5_proj = enrollment_projection[min(5, growth_years)] if len(enrollment_projection) > 5 else enrollment_projection[-1]
+            year_3_proj = enrollment_projection[min(3, growth_years)] if len(enrollment_projection) > 3 else enrollment_projection[-1]
+            
+            st.metric(f"Year {growth_years} Projection", f"{enrollment_projection[-1]:,}")
+            st.metric("Potential Growth", f"+{enrollment_projection[-1] - current_enrollment:,}", 
+                     f"{((enrollment_projection[-1] - current_enrollment) / current_enrollment * 100):.1f}%")
+            
+            st.markdown("---")
+            st.markdown("### Addressable Market")
+            st.markdown(f"- Total K-12 Pool: **{total_k12_pool:,.0f}**")
+            st.markdown(f"- High Priority Pool: **{high_priority_pool:,.0f}**")
+            st.markdown(f"- Strong Potential Pool: **{strong_potential_pool:,.0f}**")
+        
+        st.divider()
+        
+        # Scenario Analysis
+        st.subheader("Scenario Analysis")
+        
+        scenarios = {
+            "Conservative": {"capture": capture_rate * 0.5, "description": "Minimal marketing investment"},
+            "Moderate": {"capture": capture_rate, "description": "Current trajectory"},
+            "Aggressive": {"capture": capture_rate * 2, "description": "Significant marketing investment"},
+        }
+        
+        scenario_cols = st.columns(3)
+        for i, (scenario_name, scenario) in enumerate(scenarios.items()):
+            with scenario_cols[i]:
+                scenario_capture = scenario['capture'] / 100
+                scenario_3yr = current_enrollment + int(total_k12_pool * scenario_capture * 0.75)  # 75% ramp by year 3
+                st.metric(scenario_name, f"{scenario_3yr:,} (3yr)")
+                st.caption(scenario['description'])
+        
+        # Action Items
+        st.divider()
+        st.subheader("Recommended Actions")
+        
+        if high_priority_pool > 0:
+            st.markdown(f"""
+            1. **Priority Marketing Campaign** - Target the **{len(df[df['zone'] == 'High Priority'])}** High Priority neighborhoods 
+               with direct mail and digital ads. Estimated reach: **{high_priority_pool:,.0f}** families.
+            
+            2. **Open House Events** - Host campus tours at times convenient for commuters 
+               (average commute: **{df['commute_minutes'].mean():.0f} min**).
+            
+            3. **Financial Aid Outreach** - For **{len(df[df['zone'] == 'Underserved'])}** Underserved areas, 
+               emphasize scholarship and financial aid options.
+            
+            4. **Transportation Solutions** - Consider bus routes or carpool programs for areas 
+               with commutes over 30 minutes.
+            
+            5. **Referral Program** - Leverage current families in high-performing areas to 
+               recruit neighbors.
+            """)
         else:
-            st.sidebar.warning("HPFI highlight enabled, but no calculable HPFI values were found.")
-
-    gdf_filtered = gdf[gdf['GEOID'].isin(demographics_filtered['block_group_id'])]
-    
-    # Main content area
-    if not demographics_filtered.empty:
-        
-        # Key metrics with positive, growth-focused language
-        st.markdown("### 📊 Opportunity Snapshot")
-        col1, col2, col3, col4 = st.columns(4)
-        
-        with col1:
-            st.metric(
-                "Areas in View", 
-                len(demographics_filtered),
-                help="Number of block groups matching current filters - each represents a potential community for outreach"
-            )
-        
-        with col2:
-            total_k12 = int(demographics_filtered['k12_pop'].sum())
-            st.metric(
-                "Student Population", 
-                f"{total_k12:,}",
-                help="Total school-age children (K-12) in filtered areas - represents market opportunity"
-            )
-        
-        with col3:
-            # Only calculate average from valid (non-NaN) income values
-            valid_incomes = demographics_filtered['income'].dropna()
-            if len(valid_incomes) > 0:
-                avg_income = int(valid_incomes.mean())
-                st.metric(
-                    "Median Income (Avg)", 
-                    f"${avg_income:,}",
-                    help="Average of block group median incomes - economic capacity indicator"
-                )
-            else:
-                st.metric(
-                    "Median Income (Avg)", 
-                    "No data",
-                    help="Economic data not available for current selection"
-                )
-        
-        with col4:
-            # Show HPFI high-potential count instead of old marketing_priority
-            if 'hpfi' in demographics_filtered.columns:
-                hpfi_cutoff = hpfi_global_75 if 'hpfi_global_75' in locals() else demographics_filtered['hpfi'].quantile(0.75)
-                high_hpfi_count = int((demographics_filtered['hpfi'] >= hpfi_cutoff).sum())
-                st.metric(
-                    "High-Potential Areas", 
-                    high_hpfi_count,
-                    help=f"Block groups with HPFI ≥ {hpfi_cutoff:.2f} (citywide top quartile for tuition-paying potential)"
-                )
-            else:
-                st.metric(
-                    "High-Potential Areas", 
-                    "Calculating...",
-                    help="HPFI being computed"
-                )
-
-        # HPFI detailed breakdown
-        if 'hpfi' in demographics_filtered.columns:
-            st.markdown("### 💡 Family Potential Index Details")
-            st.caption("HPFI measures tuition-paying capacity: Income (45%), Economic Stability (18%), Campus Proximity (13%), Mission Alignment/Christian % (12%), K-12 Market (9%), Low Competition (3%)")
-            hpfi_cols = st.columns(3)
-            hpfi_avg = demographics_filtered['hpfi'].mean()
-            hpfi_cutoff = hpfi_global_75 if 'hpfi_global_75' in locals() else 0.75
-            hpfi_top = int((demographics_filtered['hpfi'] >= hpfi_cutoff).sum())
-            hpfi_max = demographics_filtered['hpfi'].max()
-            with hpfi_cols[0]:
-                st.metric("Average HPFI", f"{hpfi_avg:.2f}", help="Mean tuition-paying potential across filtered areas (0.00 = lowest, 1.00 = highest)")
-            with hpfi_cols[1]:
-                st.metric("Top-Tier Areas (≥ citywide 75th)", hpfi_top, help=f"Block groups with HPFI ≥ {hpfi_cutoff:.2f} (citywide 75th percentile)")
-            with hpfi_cols[2]:
-                st.metric("Peak HPFI", f"{hpfi_max:.2f}", help="Highest HPFI score in current selection")
-        
-        with st.expander("How the Educational Desert Index (EDI) is calculated", expanded=False):
-            st.markdown(
-                """
-                **Rigorous 2-Step Floating Catchment Area (2SFCA) Analysis:**
-
-                **Step 1:** For each school, calculate gravity-weighted demand in its catchment:
-                - R_j = seats_j / Σ(pop_i × w(d_ij)) where w(d) = exp(-d/5km)
-                
-                **Step 2:** For each block group, sum accessibility from all schools:
-                - A_i = Σ(R_j × w(d_ij)) = aggregate capacity-to-demand ratio
-                
-                **Four components (each 0-1, higher = worse):**
-
-                1. **Accessibility (40%)** – Inverse of 2SFCA accessibility score. Accounts for distance decay and competing demand. Lower A_i = higher EDI.
-                2. **Seat Ratio (30%)** – Gravity-weighted local seats / K-12 population. Measures true overcrowding with shared catchments.
-                3. **Need (20%)** – Poverty rate (70%) + % adults without HS diploma (30%). Socioeconomic barriers to education.
-                4. **Infrastructure (10%)** – Estimated broadband access (inverse poverty proxy). Technology access for remote learning.
-
-                **Final EDI** = (0.40×access + 0.30×ratio + 0.20×need + 0.10×infra), scaled 0–100.
-                
-                **Higher EDI = true educational desert** (poor access, overcrowded, high barriers, low infrastructure).
-                
-                *2SFCA prevents distant schools from dominating scores and accounts for competing demand across overlapping catchments.*
-                """
-            )
-
-        # Main map
-        st.subheader(f"📍 {selected_metric} by Block Group")
-        
-        # Check if we're in overlay or marketing zones mode
-        is_overlay_mode = selected_metric == 'Overlay: EDI × HPFI'
-        is_marketing_zones = selected_metric == 'High-Potential Marketing Zones'
-        
-        if is_overlay_mode or is_marketing_zones or (selected_metric in color_options and color_options[selected_metric] in demographics_filtered.columns):
-            if hpfi_threshold is not None:
-                st.info(f"💡 HPFI Focus Mode: Showing block groups with HPFI ≥ {hpfi_threshold:.2f} (citywide top quartile for tuition-paying potential).")
-            
-            # Show zone counts for overlay mode
-            if is_overlay_mode and 'zone' in demographics_filtered.columns:
-                zone_counts = demographics_filtered['zone'].value_counts()
-                col1, col2, col3, col4 = st.columns(4)
-                with col1:
-                    golden_count = zone_counts.get('Golden Zone', 0)
-                    st.metric(
-                        'Golden Zone',
-                        golden_count,
-                        help=f"EDI ≥ {global_edi_75:.1f} and HPFI ≥ {hpfi_global_75:.2f} (citywide 75th percentiles)"
-                    )
-                with col2:
-                    mission_count = zone_counts.get('Mission Zone', 0)
-                    st.metric(
-                        'Mission Zone',
-                        mission_count,
-                        help=f"EDI ≥ {global_edi_75:.1f} and HPFI < {hpfi_global_75:.2f}"
-                    )
-                with col3:
-                    affluent_count = zone_counts.get('Affluent Opportunity Zone', 0)
-                    st.metric(
-                        'Affluent Opportunity',
-                        affluent_count,
-                        help=f"EDI < {global_edi_75:.1f} and HPFI ≥ {hpfi_global_75:.2f}"
-                    )
-                with col4:
-                    low_priority_count = zone_counts.get('Low Priority Zone', 0)
-                    st.metric(
-                        'Low Priority Zone',
-                        low_priority_count,
-                        help=f"EDI < {global_edi_75:.1f} and HPFI < {hpfi_global_75:.2f}"
-                    )
-            
-            # Show marketing zone counts
-            if is_marketing_zones and 'marketing_zone' in demographics_filtered.columns:
-                st.markdown("### 🎯 Marketing Zone Distribution")
-                st.caption("Zones optimized for growth strategy: High HPFI + moderate EDI + strong K-12 population")
-                zone_counts = demographics_filtered['marketing_zone'].value_counts()
-                col1, col2, col3, col4 = st.columns(4)
-                with col1:
-                    premium_count = zone_counts.get('Premium Growth Target', 0)
-                    st.metric(
-                        '🌟 Premium Growth',
-                        premium_count,
-                        help=(
-                            f"HPFI ≥ {marketing_hpfi_75:.2f}, EDI between {marketing_edi_25:.1f}–{marketing_edi_75:.1f}, "
-                            f"K-12 ≥ {marketing_k12_median:,.0f} students"
-                        )
-                    )
-                with col2:
-                    established_count = zone_counts.get('Established Market', 0)
-                    st.metric(
-                        '💼 Established Market',
-                        established_count,
-                        help=f"HPFI ≥ {marketing_hpfi_75:.2f}, EDI < {marketing_edi_25:.1f}"
-                    )
-                with col3:
-                    emerging_count = zone_counts.get('Emerging Opportunity', 0)
-                    st.metric(
-                        '📈 Emerging Opportunity',
-                        emerging_count,
-                        help=f"HPFI between {marketing_hpfi_50:.2f}–{marketing_hpfi_75:.2f}, EDI between {marketing_edi_25:.1f}–{marketing_edi_75:.1f}"
-                    )
-                with col4:
-                    foundation_count = zone_counts.get('Foundation Building', 0)
-                    st.metric(
-                        '🏗️ Foundation Building',
-                        foundation_count,
-                        help='Longer-term relationship development areas'
-                    )
-            
-            visible_competition = competition_schools[
-                competition_schools['type'].isin(selected_competition_types)
-            ] if selected_competition_types else pd.DataFrame()
-            
-            # Determine column name and use_zones flag
-            if is_marketing_zones:
-                color_col = 'marketing_zone'
-                use_zones_flag = 'marketing'
-            elif is_overlay_mode:
-                color_col = 'zone'
-                use_zones_flag = True
-            else:
-                color_col = color_options.get(selected_metric, 'k12_pop')
-                use_zones_flag = False
-            
-            # Methodology & Equations (short summary for users)
-            with st.expander('📐 Methodology & Equations (short)'):
-                st.markdown('''
-                **HPFI (High-Potential Family Index)** — weighted 0–1 score for tuition-paying potential:
-
-                HPFI = w_income * income_norm + w_inverse_poverty * inverse_poverty_norm + w_proximity * proximity_norm + w_christian * christian_norm + w_k12 * k12_norm + w_inverse_edi * inverse_edi
-
-                **EDI (Educational Desert Index)** — 0–100 index: combination of access, supply/demand ratio, distance barriers, and socioeconomic need via a 2SFCA calculation.
-
-                **RHI (Recruitment Heat Index)** — normalized index combining premium potential, transit access, crime (inverted), vacancy, gini inequality, student proximity & faith alignment.
-
-                All component inputs are normalized to 0–1 by min-max scaling before weighting. Crime is inverted (1 - normalized(crime_per_1k)) to convert higher crime to lower safety.
-                ''')
-            fig = create_choropleth_map(
-                gdf_filtered,
-                demographics_filtered,
-                color_col,
-                f"{selected_metric} across Philadelphia Block Groups",
-                show_current_students,
-                current_students if show_current_students else None,
-                show_competition_overlay,
-                visible_competition,
-                use_zones=use_zones_flag,
-                map_style=st.session_state.get('map_style', 'open-street-map'),
-                show_student_heatmap=st.session_state.get('show_student_heatmap', False),
-                student_heatmap_radius=st.session_state.get('student_heatmap_radius', 15),
-                highlight_premium=st.session_state.get('highlight_premium', True),
-                show_vacancy_layer=st.session_state.get('show_vacancy_layer', False),
-                show_crime_layer=st.session_state.get('show_crime_layer', False),
-                show_transit_layer=st.session_state.get('show_transit_layer', False),
-                show_food_layer=st.session_state.get('show_food_layer', False),
-                show_hud_layer=st.session_state.get('show_hud_layer', False)
-            )
-            # Provide map style and optional student heatmap parameters from session state
-            st.plotly_chart(fig, width='stretch')
-        else:
-            st.info(f"📊 Data for {selected_metric} is being prepared...")
-        
-        # Analysis tables
-        st.subheader("📊 Detailed Analysis")
-        
-        # Marketing zones mode: show premium growth targets first
-        if is_marketing_zones and 'marketing_zone' in demographics_filtered.columns:
-            st.write("**Top Premium Growth Targets (High HPFI + Moderate EDI + Strong K12)**")
-            premium_zones = demographics_filtered[demographics_filtered['marketing_zone'] == 'Premium Growth Target'].nlargest(10, 'hpfi')[
-                ['block_group_id', 'hpfi', 'EDI', 'income', 'k12_pop']
-            ].copy()
-            if len(premium_zones) > 0:
-                premium_zones['hpfi'] = premium_zones['hpfi'].map(lambda v: f"{v:.2f}")
-                premium_zones['EDI'] = premium_zones['EDI'].map(lambda v: f"{v:.2f}")
-                premium_zones['income'] = premium_zones['income'].map(lambda v: f"${v:,.0f}")
-                premium_zones['k12_pop'] = premium_zones['k12_pop'].map(lambda v: f"{int(v):,}")
-                st.dataframe(premium_zones, width='stretch', use_container_width=True)
-            else:
-                st.info("No block groups found in Premium Growth Target zone. Adjust filters to see more areas.")
-            st.divider()
-        
-        # Overlay mode: show zone breakdown first
-
-        if is_overlay_mode and 'zone' in demographics_filtered.columns:
-            st.write("**Top Golden Zones (EDI × HPFI Overlay)**")
-            golden_zones = demographics_filtered[demographics_filtered['zone'] == 'Golden Zone'].nlargest(10, 'EDI')[
-                ['block_group_id', 'EDI', 'hpfi', 'income', 'k12_pop']
-            ].copy()
-            if len(golden_zones) > 0:
-                golden_zones['EDI'] = golden_zones['EDI'].map(lambda v: f"{v:.2f}")
-                golden_zones['hpfi'] = golden_zones['hpfi'].map(lambda v: f"{v:.2f}")
-                golden_zones['income'] = golden_zones['income'].map(lambda v: f"${v:,.0f}")
-                golden_zones['k12_pop'] = golden_zones['k12_pop'].map(lambda v: f"{int(v):,}")
-                st.dataframe(golden_zones, width='stretch', use_container_width=True)
-            else:
-                st.info("No block groups found in Golden Zone.")
-            st.divider()
-        
-        col1, col2, col3 = st.columns(3)
-        
-        with col1:
-            st.write("**Top 10 Block Groups by Educational Desert Index**")
-            if 'EDI' in demographics_filtered.columns:
-                top_edi = demographics_filtered.nlargest(10, 'EDI')[
-                    ['block_group_id', 'EDI', 'k12_pop', 'income']
-                ].round(2)
-                st.dataframe(top_edi, width='stretch')
-        
-        with col2:
-            st.write("**Top 10 Block Groups by Marketing Priority**")
-            if 'marketing_priority' in demographics_filtered.columns:
-                top_marketing = demographics_filtered.nlargest(10, 'marketing_priority')[
-                    ['block_group_id', 'marketing_priority', 'k12_pop', 'income']
-                ]
-                st.dataframe(top_marketing, width='stretch')
-
-        with col3:
-            st.write("**Top 10 Block Groups by HPFI**")
-            if 'hpfi' in demographics_filtered.columns:
-                top_hpfi = demographics_filtered.nlargest(10, 'hpfi')[
-                    ['block_group_id', 'hpfi', 'income', 'k12_pop']
-                ].copy()
-                top_hpfi['hpfi'] = top_hpfi['hpfi'].map(lambda v: f"{v:.2f}")
-                top_hpfi['income'] = top_hpfi['income'].map(lambda v: f"${v:,.0f}")
-                st.dataframe(top_hpfi, width='stretch')
-        # Add Top Recruitment Targets by RHI
-        if 'recruitment_heat_index' in demographics_filtered.columns:
-            st.divider()
-            st.write('**Top 50 Recruitment Targets (RHI)**')
-            top_targets = demographics_filtered.sort_values('recruitment_heat_index', ascending=False).head(50)[[
-                'block_group_id', 'recruitment_heat_index', 'hpfi', 'EDI', 'crime_norm', 'transit_norm', 'vacancy_norm', 'gini_norm', 'nearest_campus_km', 'k12_pop', 'income', 'faith_norm'
-            ]].copy()
-            if not top_targets.empty:
-                top_targets['recruitment_heat_index'] = top_targets['recruitment_heat_index'].map(lambda v: f"{v:.1f}")
-                top_targets['hpfi'] = top_targets['hpfi'].map(lambda v: f"{v:.2f}")
-                top_targets['EDI'] = top_targets['EDI'].map(lambda v: f"{v:.1f}")
-                top_targets['income'] = top_targets['income'].map(lambda v: f"${v:,.0f}")
-                top_targets['k12_pop'] = top_targets['k12_pop'].map(lambda v: f"{int(v):,}")
-                st.dataframe(top_targets, use_container_width=True)
-                # Offer Copy/Download of block group list
-                id_list = '\n'.join(top_targets['block_group_id'].astype(str).tolist())
-                st.download_button('Copy Block Group IDs', id_list, file_name='top_recruitment_targets.txt', mime='text/plain')
-        
-        # Export option
-        st.subheader("📥 Export Data")
-        if st.button("Download Filtered Data as CSV"):
-            csv = demographics_filtered.to_csv(index=False)
-            st.download_button(
-                label="Download CSV",
-                data=csv,
-                file_name=f"philadelphia_block_groups_filtered_{pd.Timestamp.now().strftime('%Y%m%d_%H%M')}.csv",
-                mime="text/csv"
-            )
-    
-    else:
-        st.info("🔍 No areas match your current filter settings. Try broadening your criteria to see more opportunities.")
-        if highlight_hpfi:
-            st.info("💡 HPFI Focus Mode is active. Disable 'Focus on High-Potential Family Index' in the sidebar to see all areas.")
-        
-        # Show available ranges with positive framing
-        if not demographics.empty:
-            st.info("**📊 Data Available Across Philadelphia:**")
-            col1, col2 = st.columns(2)
-            with col1:
-                st.write(f"• Income Range: ${demographics['income'].min():,.0f} - ${demographics['income'].max():,.0f}")
-                st.write(f"• Student Population Range: {demographics['k12_pop'].min():.0f} - {demographics['k12_pop'].max():.0f}")
-            with col2:
-                st.write(f"• Total Areas Available: {len(demographics)}")
-                st.write(f"• Geographic Coverage: Up to 35 km from CCA campuses")
+            st.info("Adjust filters to identify High Priority areas for targeted recommendations.")
 
 if __name__ == "__main__":
     main()

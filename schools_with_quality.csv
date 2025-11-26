@@ -1,0 +1,102 @@
+school_name,type,lat,lon,quality_rating
+St. Barnabas Catholic School,Catholic,39.9224727236,-75.226760178385,0.7
+St. Thomas Aquinas Catholic School,Catholic,39.930819087001,-75.174792018053,0.7
+St. Francis de Sales School,Catholic,39.947543603527,-75.215738363368,0.7
+St. Peter's School,Private,39.942531746081,-75.14770499218,0.85
+Greene Towne Montessori School,Private,39.956035126971,-75.17581719381,0.8
+Harrity Elementary – Mastery Schools,Charter,39.948388537622,-75.235565930009,0.6
+Independence Charter School,Charter,39.945005691278,-75.168625014326,0.75
+Christopher Columbus Charter School,Charter,39.934477433328,-75.165376239298,0.7
+Russell Byers Charter School,Charter,39.955477976247,-75.171349401257,0.75
+The Philadelphia School,Private,39.946764678253,-75.181704008732,0.9
+Holy Child Academy,Private,39.948350457515,-75.293812428042,0.85
+Friends Select School,Private,39.955946434221,-75.167919477467,0.95
+Philadelphia Free School,Private,39.944448105142,-75.218658873435,0.7
+The City School,Christian,39.971456936719,-75.176193617843,0.75
+Henry C Lea School,Elementary School,39.9786,-75.1547,0.45
+William D Kelley School,Elementary School,39.9863,-75.1289,0.65
+Edward Heston School,Elementary School,39.9324,-75.2156,0.45
+John F Hartranft School,Elementary School,39.9289,-75.1734,0.45
+Joseph Pennell School,Elementary School,39.9445,-75.1623,0.45
+Robert E Lamberton School,Elementary School,39.8934,-75.2345,0.45
+Samuel Powel School,Elementary School,39.9256,-75.1489,0.65
+Spruance Gilbert School,Elementary School,39.9567,-75.1234,0.4
+Thomas K Finletter School,Elementary School,40.0234,-75.0987,0.65
+William H Hunter School,Elementary School,39.9789,-75.1567,0.45
+Beeber Middle School,Middle School,40.0456,-75.0823,0.65
+John Bartram High School,Middle School,39.9134,-75.2234,0.45
+Tilden Middle School,Middle School,39.9645,-75.1456,0.65
+Shoemaker Middle School,Middle School,40.0123,-75.1234,0.65
+Parkway Northwest,Middle School,40.0543,-75.1765,0.45
+Abraham Lincoln High School,High School,40.0567,-75.0645,0.65
+Central High School,High School,40.0289,-75.1189,0.65
+Frankford High School,High School,40.0234,-75.0876,0.65
+George Washington High School,High School,40.0456,-75.0934,0.65
+Germantown High School,High School,40.0389,-75.1723,0.45
+Martin Luther King High School,High School,39.9756,-75.2234,0.95
+Northeast High School,High School,40.0678,-75.0456,0.65
+Olney High School,High School,40.0345,-75.1234,0.65
+Overbrook High School,High School,39.9856,-75.2456,0.95
+South Philadelphia High School,High School,39.9134,-75.1623,0.45
+KIPP Philadelphia Charter School,Elementary School,39.9689,-75.1534,0.45
+Mastery Charter School,High School,39.9456,-75.1789,0.45
+Penn Alexander School,Elementary School,39.9534,-75.2123,0.95
+Philadelphia Performing Arts,High School,39.9523,-75.1638,0.45
+Haverford High School,High School,39.9823,-75.3234,0.95
+Marple Newtown High School,High School,39.9534,-75.3567,0.65
+Radnor High School,High School,40.0234,-75.3456,0.95
+Springfield High School,High School,39.9312,-75.3123,0.85
+Upper Darby High School,High School,39.9567,-75.2834,0.95
+Cheltenham High School,High School,40.0567,-75.1234,0.65
+Lower Merion High School,High School,40.0234,-75.2567,0.95
+Plymouth Whitemarsh High School,High School,40.0878,-75.2456,0.45
+Springfield Township High School,High School,40.0945,-75.1923,0.45
+Wissahickon High School,High School,40.0823,-75.1567,0.45
+Great Valley High School,High School,40.0678,-75.4234,0.65
+Tredyffrin Easttown High School,High School,40.0456,-75.4567,0.65
+West Chester East High School,High School,39.9567,-75.5234,0.65
+West Chester Henderson High School,High School,39.9789,-75.5567,0.65
+Haddonfield Memorial High School,Public,39.8916,-75.0331,0.95
+Haddonfield Middle School,Public,39.8958,-75.0352,0.95
+Central Elementary School,Public,39.8913,-75.0325,0.95
+Elizabeth Haddon Elementary,Public,39.8897,-75.0296,0.95
+J. Fithian Tatem Elementary,Public,39.8968,-75.0282,0.95
+Cherry Hill High School East,Public,39.9035,-74.9651,0.85
+Cherry Hill High School West,Public,39.9124,-74.9983,0.85
+Rosa International Middle School,Public,39.8895,-74.9724,0.85
+Carusi Middle School,Public,39.9138,-74.9825,0.85
+Beck Middle School,Public,39.8792,-75.0127,0.85
+Joseph D. Sharp Elementary,Public,39.9186,-74.9544,0.85
+Woodcrest Elementary,Public,39.8983,-74.9542,0.85
+Stockton Elementary,Public,39.9145,-74.9688,0.85
+Eastern Regional High School,Public,39.8385,-74.9473,0.8
+Voorhees Middle School,Public,39.8519,-74.9573,0.8
+Signal Hill School,Public,39.847,-74.9685,0.8
+Osage Elementary School,Public,39.8612,-74.9497,0.8
+Collingswood High School,Public,39.9108,-75.0714,0.8
+Collingswood Middle School,Public,39.9134,-75.0684,0.8
+Zane North Elementary,Public,39.9226,-75.0612,0.8
+Camden High School,Public,39.9391,-75.1087,0.4
+Woodrow Wilson High School,Public,39.9482,-75.0982,0.4
+Creative Arts Morgan Village Academy,Public,39.9523,-75.0922,0.4
+KIPP Cooper Norcross Academy,Charter,39.9438,-75.1012,0.4
+Camden Catholic High School,Catholic,39.8949,-75.0492,0.65
+Paul VI High School,Catholic,39.8622,-75.0117,0.65
+Bishop Eustace Prep,Catholic,39.8693,-74.9831,0.65
+Moorestown High School,Public,39.9756,-74.9451,0.95
+William Allen Middle School,Public,39.9689,-74.9524,0.95
+South Valley Elementary,Public,39.9613,-74.9389,0.95
+George C. Baker Elementary,Public,39.9823,-74.9368,0.95
+Moorestown Friends School,Private,39.9686,-74.9483,0.95
+Lenape High School,Public,39.8673,-74.8538,0.8
+Shawnee High School,Public,39.8954,-74.8847,0.8
+Cherokee High School,Public,39.8529,-74.9248,0.8
+Seneca High School,Public,39.7989,-74.9123,0.65
+Lenape Regional High School,Public,39.9341,-74.8963,0.75
+Harrington Middle School,Public,39.9423,-74.9026,0.75
+Washington Township High School,Public,39.7498,-75.0653,0.75
+Kingsway Regional High School,Public,39.7251,-75.1538,0.65
+Clearview Regional High School,Public,39.7823,-75.0812,0.75
+Delsea Regional High School,Public,39.6592,-75.0756,0.75
+Williamstown High School,Public,39.6873,-74.9851,0.75
+Gloucester Catholic High School,Catholic,39.7893,-75.1197,0.75
