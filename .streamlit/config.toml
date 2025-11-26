@@ -1,0 +1,11 @@
+[server]
+headless = true
+port = 8501
+
+[browser]
+gatherUsageStats = false
+
+[runner]
+magicEnabled = true
+installTracer = false
+fixMatplotlib = true
